@@ -1,0 +1,24 @@
+# Build artifacts
+bin/
+build/
+*.o
+*.so
+*.a
+
+# Test outputs & temporary files
+snapshots/
+*.jpg
+*.json.frames.csv
+/tmp/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*~

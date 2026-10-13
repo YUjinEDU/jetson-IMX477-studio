@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright 2026 YUjinEDU -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jetson IMX477 Studio — 120fps ISP</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <span class="status-indicator" id="conn-pill" title="Connecting..."></span>
+      <h1 class="title">IMX477 STUDIO</h1>
+      <span class="badge">DIRECT ARGUS 1332&times;990@120</span>
+    </div>
+    <div class="header-actions">
+      <div class="preset-group">
+        <label for="preset-select">Preset:</label>
+        <select id="preset-select">
+          <option value="">(Loading...)</option>
+        </select>
+        <button id="btn-load-preset" class="btn btn-secondary">Load</button>
+        <button id="btn-save-preset" class="btn btn-secondary">Save As...</button>
+      </div>
+      <button id="btn-snapshot" class="btn btn-primary">&#128247; Take Snapshot</button>
+    </div>
+  </header>
+
+  <main class="studio-layout">
+    <!-- Left Column: Viewport & Assistants -->
+    <section class="viewport-column">
+      <div class="viewport-card">
+        <div class="viewport-container" id="viewport-wrap">
+          <img id="stream-img" src="/stream.mjpg" alt="120fps ISP Video Stream" crossorigin="anonymous">
+          <canvas id="overlay-canvas"></canvas>
+          <div class="viewport-hud" id="viewport-hud">
+            <span id="hud-res">1332&times;990</span>
+            <span id="hud-fps">-- FPS</span>
+          </div>
+        </div>
+
+        <!-- Viewport Toolbar -->
+        <div class="viewport-toolbar">
+          <div class="tool-group">
+            <span class="tool-label">Zoom:</span>
+            <button class="btn-tool active" data-zoom="fit">Fit</button>
+            <button class="btn-tool" data-zoom="1x">1:1 Native</button>
+            <button class="btn-tool" data-zoom="2x">2x Crop</button>
+          </div>
+          <div class="tool-group">
+            <span class="tool-label">Assist:</span>
+            <label class="toggle-pill">
+              <input type="checkbox" id="chk-peaking"> Peaking
+            </label>
+            <label class="toggle-pill">
+              <input type="checkbox" id="chk-zebra"> Zebra
+            </label>
+            <select id="select-grid" class="select-sm">
+              <option value="none">Grid: Off</option>
+              <option value="rule_of_thirds">3&times;3 Grid</option>
+              <option value="crosshair">Crosshair</option>
+            </select>
+          </div>
+          <div class="tool-group">
+            <span class="tool-label">View FPS:</span>
+            <select id="select-view-fps" class="select-sm">
+              <option value="15">15 fps</option>
+              <option value="30" selected>30 fps</option>
+              <option value="60">60 fps</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Assist Instruments: Focus Sharpness & Histogram -->
+      <div class="instruments-grid">
+        <div class="instrument-card">
+          <div class="instrument-header">
+            <span>FOCUS SHARPNESS (LAPLACIAN)</span>
+            <span id="focus-score-val" class="instrument-val">--</span>
+          </div>
+          <div class="meter-bar-wrap">
+            <div id="focus-meter-fill" class="meter-fill"></div>
+            <div id="focus-meter-peak" class="meter-peak"></div>
+          </div>
+        </div>
+
+        <div class="instrument-card">
+          <div class="instrument-header">
+            <span>LUMA HISTOGRAM (64 BINS)</span>
+            <span class="instrument-sub">0 &rarr; 255</span>
+          </div>
+          <canvas id="histogram-canvas" width="300" height="36"></canvas>
+        </div>
+      </div>
+
+      <!-- Motion Blur Calculator (Baseball Tracking Assist) -->
+      <div class="card blur-calc-card">
+        <div class="card-header">
+          <h3>MOTION BLUR ESTIMATOR (SPORTS / BALL TRACKING)</h3>
+          <span class="chip-info">Theoretical streak length</span>
+        </div>
+        <div class="blur-calc-body">
+          <div class="calc-row">
+            <label for="input-ball-speed">Object Speed (km/h):</label>
+            <input type="number" id="input-ball-speed" value="140" min="10" max="300" step="5">
+            <span class="calc-hint" id="calc-speed-ms">38.9 m/s</span>
+          </div>
+          <div class="calc-row">
+            <label for="input-fov-width">Field-of-View Width (meters):</label>
+            <input type="number" id="input-fov-width" value="3.0" min="0.5" max="50.0" step="0.5">
+            <span class="calc-hint">Across 1332px</span>
+          </div>
+          <div class="calc-results">
+            <div class="blur-stat">
+              <span class="stat-name">BLUR STREAK:</span>
+              <span class="stat-val highlight" id="calc-blur-cm">-- cm</span>
+            </div>
+            <div class="blur-stat">
+              <span class="stat-name">SENSOR PIXELS:</span>
+              <span class="stat-val" id="calc-blur-px">-- px</span>
+            </div>
+            <div class="blur-stat">
+              <span class="stat-name">RECOMMENDED EXP:</span>
+              <span class="stat-val" id="calc-blur-rec">&le; 1.0 ms for &le; 4cm</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Right Column: Telemetry & Controls -->
+    <aside class="control-column">
+      <!-- Live Telemetry Panel -->
+      <div class="card telemetry-card">
+        <div class="card-header">
+          <h3>TELEMETRY &amp; HARDWARE METRICS</h3>
+          <span id="telemetry-time" class="time-tag">--:--</span>
+        </div>
+        <div class="metrics-grid">
+          <div class="metric-box">
+            <span class="metric-title">SENSOR INPUT</span>
+            <div class="metric-number" id="metric-sensor-fps">--</div>
+            <span class="metric-unit">FPS (120 target)</span>
+          </div>
+          <div class="metric-box">
+            <span class="metric-title">HOST RECEIVE</span>
+            <div class="metric-number" id="metric-host-fps">--</div>
+            <span class="metric-unit">FPS</span>
+          </div>
+          <div class="metric-box">
+            <span class="metric-title">DISPLAY STREAM</span>
+            <div class="metric-number" id="metric-display-fps">--</div>
+            <span class="metric-unit">FPS (viewers: <span id="metric-viewers">0</span>)</span>
+          </div>
+          <div class="metric-box">
+            <span class="metric-title">SEQUENCE GAPS</span>
+            <div class="metric-number success" id="metric-gaps">0</div>
+            <span class="metric-unit">Lost frames</span>
+          </div>
+          <div class="metric-box">
+            <span class="metric-title">INTERVAL JITTER</span>
+            <div class="metric-number" id="metric-bad-iv">0</div>
+            <span class="metric-unit" id="metric-iv-range">-- ms</span>
+          </div>
+          <div class="metric-box">
+            <span class="metric-title">TOTAL CAPTURE</span>
+            <div class="metric-number" id="metric-total-frames">--</div>
+            <span class="metric-unit" id="metric-uptime">--</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Exposure & Gain Controls -->
+      <div class="card controls-card">
+        <div class="card-header">
+          <h3>EXPOSURE &amp; SENSOR GAIN</h3>
+          <div class="toggle-mode">
+            <label><input type="radio" name="ae-mode" value="manual" checked> Manual</label>
+            <label><input type="radio" name="ae-mode" value="auto"> Auto (AE)</label>
+          </div>
+        </div>
+
+        <div class="control-group" id="manual-exp-group">
+          <div class="control-label-row">
+            <label for="range-exp">Exposure Time</label>
+            <div class="val-display">
+              <span id="val-exp-us">4000 &micro;s</span>
+              <span class="val-sub" id="val-exp-ms">(4.00 ms)</span>
+            </div>
+          </div>
+          <input type="range" id="range-exp" min="13" max="8333" step="10" value="4000">
+          <div class="quick-btns">
+            <button class="btn-chip" data-exp="500">0.5ms</button>
+            <button class="btn-chip" data-exp="1000">1.0ms</button>
+            <button class="btn-chip" data-exp="2000">2.0ms</button>
+            <button class="btn-chip active" data-exp="4000">4.0ms</button>
+            <button class="btn-chip" data-exp="8000">8.0ms</button>
+          </div>
+        </div>
+
+        <div class="control-group" id="manual-gain-group">
+          <div class="control-label-row">
+            <label for="range-gain">Analog Gain</label>
+            <span class="val-display" id="val-gain">2.00&times;</span>
+          </div>
+          <input type="range" id="range-gain" min="1.0" max="22.25" step="0.25" value="2.0">
+          <div class="quick-btns">
+            <button class="btn-chip" data-gain="1.0">1&times;</button>
+            <button class="btn-chip active" data-gain="2.0">2&times;</button>
+            <button class="btn-chip" data-gain="4.0">4&times;</button>
+            <button class="btn-chip" data-gain="8.0">8&times;</button>
+            <button class="btn-chip" data-gain="16.0">16&times;</button>
+          </div>
+        </div>
+
+        <!-- Auto Exposure Sub-options (hidden in manual mode) -->
+        <div class="control-subgroup" id="ae-options" style="display: none;">
+          <div class="control-label-row">
+            <label for="range-ae-max-exp">AE Max Exposure</label>
+            <span class="val-display" id="val-ae-max-exp">8000 &micro;s</span>
+          </div>
+          <input type="range" id="range-ae-max-exp" min="500" max="8333" step="100" value="8000">
+
+          <div class="control-label-row">
+            <label for="range-ae-max-gain">AE Max Gain</label>
+            <span class="val-display" id="val-ae-max-gain">16.0&times;</span>
+          </div>
+          <input type="range" id="range-ae-max-gain" min="1.0" max="22.25" step="0.5" value="16.0">
+
+          <div class="checkbox-row">
+            <label><input type="checkbox" id="chk-ae-lock"> AE Lock</label>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <div class="control-label-row">
+            <label for="range-ev">EV Compensation</label>
+            <span class="val-display" id="val-ev">0.0 EV</span>
+          </div>
+          <input type="range" id="range-ev" min="-2.0" max="2.0" step="0.25" value="0.0">
+        </div>
+
+        <div class="control-row">
+          <label for="select-antibanding">Antibanding (Anti-flicker):</label>
+          <select id="select-antibanding">
+            <option value="auto" selected>Auto</option>
+            <option value="60hz">60 Hz (Korea/USA)</option>
+            <option value="50hz">50 Hz</option>
+            <option value="off">Off</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- White Balance & ISP Settings -->
+      <div class="card controls-card">
+        <div class="card-header">
+          <h3>ISP &amp; COLOR PIPELINE</h3>
+        </div>
+
+        <div class="control-row">
+          <label for="select-awb">White Balance:</label>
+          <select id="select-awb">
+            <option value="auto" selected>Auto (AWB)</option>
+            <option value="daylight">Daylight (Sunny)</option>
+            <option value="cloudy">Cloudy</option>
+            <option value="incandescent">Incandescent</option>
+            <option value="fluorescent">Fluorescent</option>
+            <option value="shade">Shade</option>
+            <option value="off">Off (Manual)</option>
+          </select>
+        </div>
+
+        <div class="checkbox-row">
+          <label><input type="checkbox" id="chk-awb-lock"> AWB Lock</label>
+          <span class="metadata-cct">Actual CCT: <strong id="val-actual-cct">-- K</strong></span>
+        </div>
+
+        <div class="control-group">
+          <div class="control-label-row">
+            <label for="range-isp-gain">ISP Digital Gain</label>
+            <span class="val-display" id="val-isp-gain">1.0&times;</span>
+          </div>
+          <input type="range" id="range-isp-gain" min="1.0" max="8.0" step="0.2" value="1.0">
+        </div>
+
+        <div class="control-row-grid">
+          <div>
+            <label for="select-denoise">Denoise:</label>
+            <select id="select-denoise">
+              <option value="off">Off</option>
+              <option value="fast" selected>Fast</option>
+              <option value="high_quality">High Quality</option>
+            </select>
+          </div>
+          <div>
+            <label for="select-edge">Sharpening:</label>
+            <select id="select-edge">
+              <option value="off">Off</option>
+              <option value="fast" selected>Fast</option>
+              <option value="high_quality">High Quality</option>
+            </select>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

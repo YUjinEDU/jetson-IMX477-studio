@@ -1,0 +1,15 @@
+Jetson IMX477 Studio
+Copyright 2026 YUjinEDU
+
+This product includes software developed at YUjinEDU.
+
+--------------------------------------------------------------------------------
+This project vendors and incorporates:
+
+1. cpp-httplib (https://github.com/yhirose/cpp-httplib)
+   Copyright (c) 2024 Yuji Hirose. All rights reserved.
+   Licensed under the MIT License.
+
+2. JSON for Modern C++ (https://github.com/nlohmann/json)
+   Copyright (c) 2013-2022 Niels Lohmann
+   Licensed under the MIT License.
