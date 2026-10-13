@@ -192,9 +192,9 @@ void DisplayPipeline::run() {
         uint32_t uv_pitch = p.planeParams.pitch[1];
         cv::Mat full_bgr;
 
-        if (s.zoom_mode == "1x" || s.zoom_mode == "2x") {
-            int crop_w = (s.zoom_mode == "1x") ? 960 : 480;
-            int crop_h = (s.zoom_mode == "1x") ? 714 : 356;
+        if (s.zoom_mode == "1x" || s.zoom_mode == "2x" || s.zoom_mode == "4x") {
+            int crop_w = (s.zoom_mode == "1x") ? 960 : (s.zoom_mode == "4x") ? 240 : 480;
+            int crop_h = (s.zoom_mode == "1x") ? 714 : (s.zoom_mode == "4x") ? 178 : 356;
             int rx = std::clamp((int)(s.center_x * src_w) - crop_w / 2, 0, (int)src_w - crop_w) & ~1;
             int ry = std::clamp((int)(s.center_y * src_h) - crop_h / 2, 0, (int)src_h - crop_h) & ~1;
 
@@ -207,8 +207,8 @@ void DisplayPipeline::run() {
                 memcpy(crop_yuv.data + uv_off + (size_t)r * crop_w, uv_data + (size_t)(ry / 2 + r) * uv_pitch + rx, crop_w);
             }
             cv::Mat crop_bgr;
-            cv::cvtColor(crop_yuv, crop_bgr, cv::COLOR_YUV2BGR_NV12);
-            if (s.zoom_mode == "2x") {
+            cv::cvtColor(crop_yuv, crop_bgr, cv::COLOR_YUV2BGR_NV21);
+            if (s.zoom_mode == "2x" || s.zoom_mode == "4x") {
                 cv::resize(crop_bgr, bgr, cv::Size(target_w, target_h), 0, 0, cv::INTER_NEAREST);
             } else {
                 bgr = crop_bgr;
@@ -223,7 +223,7 @@ void DisplayPipeline::run() {
             for (int r = 0; r < (int)src_h / 2; ++r) {
                 memcpy(yuv.data + uv_off + (size_t)r * src_w, uv_data + (size_t)r * uv_pitch, src_w);
             }
-            cv::cvtColor(yuv, full_bgr, cv::COLOR_YUV2BGR_NV12);
+            cv::cvtColor(yuv, full_bgr, cv::COLOR_YUV2BGR_NV21);
             cv::resize(full_bgr, bgr, cv::Size(target_w, target_h), 0, 0, cv::INTER_AREA);
         }
         // Snapshot handler on full-res frame
@@ -242,7 +242,7 @@ void DisplayPipeline::run() {
                     for (int r = 0; r < (int)src_h / 2; ++r) {
                         memcpy(full_yuv.data + uv_off + (size_t)r * src_w, uv_data + (size_t)r * uv_pitch, src_w);
                     }
-                    cv::cvtColor(full_yuv, snap_bgr, cv::COLOR_YUV2BGR_NV12);
+                    cv::cvtColor(full_yuv, snap_bgr, cv::COLOR_YUV2BGR_NV21);
                 }
                 std::vector<uint8_t> snap_jpg;
                 if (encode_jpeg_bgr(snap_bgr, snap_jpg, 95)) {

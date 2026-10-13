@@ -149,7 +149,7 @@ class StudioCamera:
 
         if self.output_format == "bgr":
             t_conv_start = time.monotonic_ns()
-            frame = cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)
+            frame = cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV21)
             t_conv_end = time.monotonic_ns()
             color_ms = (t_conv_end - t_conv_start) / 1e6
         else:

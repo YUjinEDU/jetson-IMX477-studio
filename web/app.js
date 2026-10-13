@@ -148,6 +148,7 @@
       if (btn.dataset.tab === 'tab-gallery') {
         loadSnapshotGallery();
       }
+      history.replaceState(null, '', '#' + btn.dataset.tab);
     });
   });
 
@@ -204,11 +205,12 @@
 
     const w = sparklineCanvas.width;
     const h = sparklineCanvas.height;
-    sparklineCtx.clearRect(0, 0, w, h);
+    sparklineCtx.fillStyle = '#f8fafc';
+    sparklineCtx.fillRect(0, 0, w, h);
 
     // Target 120 FPS dashed horizontal guideline
     const targetY = h - (120.0 / 140.0) * h;
-    sparklineCtx.strokeStyle = 'rgba(16, 185, 129, 0.35)';
+    sparklineCtx.strokeStyle = 'rgba(5, 150, 105, 0.5)';
     sparklineCtx.lineWidth = 1;
     sparklineCtx.setLineDash([4, 4]);
     sparklineCtx.beginPath();
@@ -228,7 +230,7 @@
       else sparklineCtx.lineTo(x, y);
     }
 
-    sparklineCtx.strokeStyle = '#3b82f6';
+    sparklineCtx.strokeStyle = '#2563eb';
     sparklineCtx.lineWidth = 2;
     sparklineCtx.stroke();
 
@@ -240,7 +242,8 @@
     if (!bins || bins.length !== 64) return;
     const w = histCanvas.width;
     const h = histCanvas.height;
-    histCtx.clearRect(0, 0, w, h);
+    histCtx.fillStyle = '#f8fafc';
+    histCtx.fillRect(0, 0, w, h);
 
     const maxVal = Math.max(...bins, 1);
     const barW = w / 64;
@@ -249,8 +252,7 @@
       const barH = (bins[i] / maxVal) * (h - 2);
       const x = i * barW;
       const y = h - barH;
-      const intensity = Math.floor((i / 64) * 200) + 55;
-      histCtx.fillStyle = `rgb(${intensity}, ${intensity}, ${intensity})`;
+      histCtx.fillStyle = '#3b82f6';
       histCtx.fillRect(x, y, barW - 0.5, barH);
     }
   }
@@ -266,8 +268,8 @@
     minimapBox.style.display = 'block';
     hudZoom.textContent = `ZOOM: ${activeZoom.toUpperCase()} (${Math.round(activeCenterX*100)}%, ${Math.round(activeCenterY*100)}%)`;
 
-    const cropW = (activeZoom === '1x') ? (960 / 1332) : (480 / 1332);
-    const cropH = (activeZoom === '1x') ? (714 / 990) : (356 / 990);
+    const cropW = (activeZoom === '1x') ? (960 / 1332) : (activeZoom === '4x') ? (240 / 1332) : (480 / 1332);
+    const cropH = (activeZoom === '1x') ? (714 / 990) : (activeZoom === '4x') ? (178 / 990) : (356 / 990);
 
     const left = Math.max(0, Math.min(1 - cropW, activeCenterX - cropW / 2));
     const top = Math.max(0, Math.min(1 - cropH, activeCenterY - cropH / 2));
@@ -427,7 +429,7 @@
     if (isSnapping) return;
     isSnapping = true;
     btnSnapshot.disabled = true;
-    btnSnapshot.textContent = '\u23F3 Snapping...';
+    btnSnapshot.textContent = '\u23F3 \uCD2C\uC601 \uC911...';
     // Flash animation
     shutterFlash.classList.remove('flash');
     void shutterFlash.offsetWidth; // re-flow
@@ -437,7 +439,7 @@
       .then(r => r.json())
       .then(d => {
         if (d.status === 'ok') {
-          showToast(`Snapshot saved: ${d.path}`);
+          showToast(`\uD83D\uDCF7 \uC2A4\uB0C5\uC0F7 \uC800\uC7A5 \uC644\uB8CC: ${d.path}`);
           loadSnapshotGallery();
         } else {
           showToast(`Snapshot failed: ${d.error || 'Unknown error'}`);
@@ -447,7 +449,7 @@
       .finally(() => {
         isSnapping = false;
         btnSnapshot.disabled = false;
-        btnSnapshot.textContent = '\uD83D\uDCF7 Snap (Space)';
+        btnSnapshot.textContent = '\uD83D\uDCF7 \uC2A4\uB0C5\uC0F7 (Space)';
       });
   }
 
@@ -505,7 +507,7 @@
       postDisplay({ focus_peaking: chkPeaking.checked });
       showToast(`Peaking: ${chkPeaking.checked ? 'ON' : 'OFF'}`);
     } else if (e.key === 'z' || e.key === 'Z') {
-      const modes = ['fit', '1x', '2x'];
+      const modes = ['fit', '1x', '2x', '4x'];
       const next = modes[(modes.indexOf(activeZoom) + 1) % modes.length];
       document.querySelector(`.btn-tool[data-zoom="${next}"]`).click();
     } else if (e.key === 'm' || e.key === 'M') {
@@ -536,6 +538,68 @@
   shortcutsModal.addEventListener('click', (e) => {
     if (e.target === shortcutsModal) shortcutsModal.style.display = 'none';
   });
+
+  // --- One-Click Scenario Presets (Tab 1) ---
+  document.querySelectorAll('.btn-preset-apply[data-preset-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const action = btn.dataset.presetAction;
+      if (action === 'daylight') {
+        postControls({ auto_exposure: false, exposure_us: 2000, gain: 1.5, awb_mode: 'auto', antibanding: 'auto' });
+        rangeExp.value = 2000; valExpUs.textContent = '2000 \u03bcs'; valExpMs.textContent = '(2.00 ms)';
+        rangeGain.value = 1.5; valGain.textContent = '1.50\u00d7';
+        selectAwb.value = 'auto'; selectAntibanding.value = 'auto';
+        showToast('\u2600\uFE0F \uC8FC\uAC04 / \uC57C\uC678 \uACE0\uC18D \uC124\uC815 \uC801\uC6A9 (2ms, 1.5\u00d7)');
+      } else if (action === 'indoor') {
+        postControls({ auto_exposure: false, exposure_us: 4000, gain: 2.5, awb_mode: 'fluorescent', antibanding: '60hz' });
+        rangeExp.value = 4000; valExpUs.textContent = '4000 \u03bcs'; valExpMs.textContent = '(4.00 ms)';
+        rangeGain.value = 2.5; valGain.textContent = '2.50\u00d7';
+        selectAwb.value = 'fluorescent'; selectAntibanding.value = '60hz';
+        showToast('\uD83D\uDCA1 \uC2E4\uB0B4 \uC870\uBA85 60Hz \uC124\uC815 \uC801\uC6A9 (4ms, 2.5\u00d7, \uD615\uAD11\uB4F1)');
+      } else if (action === 'baseball') {
+        postControls({ auto_exposure: false, exposure_us: 1000, gain: 4.0, awb_mode: 'auto' });
+        rangeExp.value = 1000; valExpUs.textContent = '1000 \u03bcs'; valExpMs.textContent = '(1.00 ms)';
+        rangeGain.value = 4.0; valGain.textContent = '4.00\u00d7';
+        postDisplay({ grid_mode: 'crosshair' });
+        selectGrid.value = 'crosshair';
+        showToast('\u26BE \uC57C\uAD6C \uD22C\uAD6C \uCD08\uACE0\uC18D 120fps \uC124\uC815 \uC801\uC6A9 (1ms, 4\u00d7, \uC379\uC790\uC120)');
+      } else if (action === 'lowlight') {
+        postControls({ auto_exposure: false, exposure_us: 8000, gain: 8.0, awb_mode: 'auto', denoise_mode: 'high_quality' });
+        rangeExp.value = 8000; valExpUs.textContent = '8000 \u03bcs'; valExpMs.textContent = '(8.00 ms)';
+        rangeGain.value = 8.0; valGain.textContent = '8.00\u00d7';
+        selectDenoise.value = 'high_quality';
+        showToast('\uD83C\uDF19 \uC800\uC870\uB3C4 \uC57C\uAC04 \uC124\uC815 \uC801\uC6A9 (8ms, 8\u00d7, \uB178\uC774\uC988\uC81C\uAC70)');
+      } else if (action === 'focus') {
+        postDisplay({ zoom_mode: '2x', focus_peaking: true, peaking_color: 'green' });
+        chkPeaking.checked = true;
+        selectPeakingColor.value = 'green';
+        activeZoom = '2x';
+        document.querySelectorAll('.btn-tool[data-zoom]').forEach(b => b.classList.toggle('active', b.dataset.zoom === '2x'));
+        updateMinimap();
+        showToast('\uD83D\uDD0D \uB80C\uC988 \uCD08\uC810 \uB9DE\uCDA4 \uBAA8\uB4DC (2\u00d7 \uC90C + \uD3EC\uCEE4\uC2A4 \uD53c\uD0B9)');
+      }
+      currentExposureUs = parseInt(rangeExp.value, 10);
+      updateBlurCalculator();
+    });
+  });
+
+  // --- Baseball Rec Shutter Button (Tab 3) ---
+  const btnApplyRecShutter = document.getElementById('btn-apply-rec-shutter');
+  if (btnApplyRecShutter) {
+    btnApplyRecShutter.addEventListener('click', () => {
+      const speedKmh = parseFloat(inputBallSpeed.value) || 145;
+      const targetExp = speedKmh >= 150 ? 500 : 1000;
+      const targetGain = targetExp === 500 ? 8.0 : 4.0;
+      postControls({ auto_exposure: false, exposure_us: targetExp, gain: targetGain });
+      rangeExp.value = targetExp;
+      valExpUs.textContent = `${targetExp} \u03bcs`;
+      valExpMs.textContent = `(${(targetExp / 1000).toFixed(2)} ms)`;
+      rangeGain.value = targetGain;
+      valGain.textContent = `${targetGain.toFixed(2)}\u00d7`;
+      currentExposureUs = targetExp;
+      updateBlurCalculator();
+      showToast(`\u26BE \uD22C\uAD6C \uCD5C\uC801 \uC124\uC815 \uC801\uC6A9: ${targetExp / 1000}ms \uC154\uD130, ${targetGain}\u00d7 \uAC8C\uC778`);
+    });
+  }
 
   // --- Sliders & Controls ---
   rangeExp.addEventListener('input', () => {
@@ -753,4 +817,8 @@
   updateBlurCalculator();
   loadPresetList();
   loadSnapshotGallery();
+  if (window.location.hash) {
+    const initTab = document.querySelector(`.tab-btn[data-tab="${window.location.hash.substring(1)}"]`);
+    if (initTab) initTab.click();
+  }
 })();
