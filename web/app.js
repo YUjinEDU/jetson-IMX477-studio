@@ -422,10 +422,12 @@
   }
 
   // --- Snapshot Trigger ---
+  let isSnapping = false;
   function triggerSnapshot() {
+    if (isSnapping) return;
+    isSnapping = true;
     btnSnapshot.disabled = true;
     btnSnapshot.textContent = '\u23F3 Snapping...';
-
     // Flash animation
     shutterFlash.classList.remove('flash');
     void shutterFlash.offsetWidth; // re-flow
@@ -443,6 +445,7 @@
       })
       .catch(e => showToast('Error: ' + e))
       .finally(() => {
+        isSnapping = false;
         btnSnapshot.disabled = false;
         btnSnapshot.textContent = '\uD83D\uDCF7 Snap (Space)';
       });
@@ -490,9 +493,8 @@
 
   // --- Keyboard Shortcuts Handler ---
   window.addEventListener('keydown', (e) => {
-    // Avoid capturing inputs
+    if (e.repeat) return; // Ignore auto-repeat when key is held down
     if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
-
     if (e.code === 'Space') {
       e.preventDefault();
       triggerSnapshot();
