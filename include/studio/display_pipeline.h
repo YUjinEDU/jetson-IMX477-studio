@@ -73,6 +73,7 @@ private:
     std::vector<uint8_t> latest_jpeg_;
     uint64_t latest_seq_{0};
 
+    std::mutex snapshot_exec_mu_;
     std::mutex snapshot_mu_;
     std::condition_variable snapshot_cv_;
     bool snapshot_requested_{false};

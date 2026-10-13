@@ -378,6 +378,7 @@ std::string DisplayPipeline::capture_snapshot(const std::string& directory) {
     if (!running_.load()) return "";
     std::error_code ec;
     std::filesystem::create_directories(directory, ec);
+    std::unique_lock<std::mutex> exec_lock(snapshot_exec_mu_);
 
     std::unique_lock<std::mutex> lock(snapshot_mu_);
     snapshot_dir_ = directory;

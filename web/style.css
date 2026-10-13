@@ -969,3 +969,34 @@ kbd {
   transform: translateY(0);
   opacity: 1;
 }
+
+/* Responsive mobile and tablet layout */
+@media (max-width: 900px) {
+  body {
+    overflow-y: auto;
+    height: auto;
+    min-height: 100vh;
+  }
+  .studio-layout {
+    grid-template-columns: 1fr;
+    height: auto;
+    overflow: visible;
+  }
+  .viewport-column, .control-column {
+    overflow: visible;
+  }
+  .instruments-grid {
+    grid-template-columns: 1fr;
+  }
+  .kpi-banner {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .app-header {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .header-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
