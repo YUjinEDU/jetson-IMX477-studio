@@ -292,6 +292,10 @@ bool CameraService::start(int ai_width, const std::string& shm_name, int sensor_
 
 void CameraService::stop() {
     if (!running_.exchange(false)) return;
+    {
+        std::lock_guard<std::mutex> dlock(impl_->display_mu);
+        impl_->display_cv.notify_all();
+    }
 
     if (impl_->capture_session) {
         auto cs = interface_cast<ICaptureSession>(impl_->capture_session);

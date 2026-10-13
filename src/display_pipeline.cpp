@@ -104,10 +104,10 @@ bool DisplayPipeline::get_latest_jpeg(std::vector<uint8_t>& out_jpeg,
                                       uint64_t& in_out_seq, int timeout_ms) {
     std::unique_lock<std::mutex> lock(frame_mu_);
     if (!frame_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
-                            [&] { return latest_seq_ > in_out_seq || !running_.load(); })) {
+                            [&] { return (latest_seq_ != in_out_seq && latest_seq_ > 0) || !running_.load(); })) {
         return false;
     }
-    if (!running_.load() || latest_seq_ <= in_out_seq) return false;
+    if (!running_.load() || latest_seq_ == in_out_seq || latest_seq_ == 0) return false;
 
     out_jpeg = latest_jpeg_;
     in_out_seq = latest_seq_;

@@ -281,7 +281,20 @@ bool HttpServer::start() {
                 res.set_content("{\"status\":\"error\",\"error\":\"mode must be 0, 1, or 2\"}", "application/json");
                 return;
             }
-            if (impl_->camera.set_sensor_mode(mode)) {
+            bool was_recording = impl_->display.is_recording();
+            if (was_recording) {
+                impl_->display.stop_recording();
+            }
+            impl_->display.stop(); // Quiesce display worker: joined before camera teardown
+
+            bool ok = impl_->camera.set_sensor_mode(mode);
+
+            impl_->display.start(); // Restart display pipeline with new resolution
+            if (was_recording && ok) {
+                impl_->display.start_recording("recordings");
+            }
+
+            if (ok) {
                 auto caps = impl_->camera.get_capabilities();
                 json out = {
                     {"status", "ok"},
