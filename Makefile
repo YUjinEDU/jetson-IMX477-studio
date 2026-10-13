@@ -5,7 +5,7 @@ CXX ?= g++
 CXXFLAGS ?= -O3 -Wall -Wextra -std=c++17 -fPIC -MMD -MP -Iinclude -Ithird_party -Ithird_party/cpp-httplib -I/usr/include/opencv4 -I/usr/src/jetson_multimedia_api/include
 LDFLAGS ?= -L/usr/lib/aarch64-linux-gnu/nvidia
 
-OPENCV_LIBS ?= -l:libopencv_core.so.406 -l:libopencv_imgproc.so.406 -l:libopencv_imgcodecs.so.406
+OPENCV_LIBS ?= -l:libopencv_core.so.406 -l:libopencv_imgproc.so.406 -l:libopencv_imgcodecs.so.406 -l:libopencv_videoio.so.406 -l:libopencv_calib3d.so.406
 ARGUS_LIBS ?= -lnvargus -lnvbufsurface -lEGL
 
 BIN_DIR := bin

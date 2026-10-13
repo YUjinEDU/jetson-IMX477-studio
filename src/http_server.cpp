@@ -50,6 +50,9 @@ bool HttpServer::start() {
     std::error_code ec_snap;
     std::filesystem::create_directories("snapshots", ec_snap);
     impl_->svr.set_mount_point("/snapshots", "snapshots");
+    std::error_code ec_rec;
+    std::filesystem::create_directories("recordings", ec_rec);
+    impl_->svr.set_mount_point("/recordings", "recordings");
 
 
     // 2. MJPEG Stream
@@ -156,7 +159,8 @@ bool HttpServer::start() {
                         {"min_exposure_us", caps.min_exposure_us},
                         {"max_exposure_us", caps.max_exposure_us},
                         {"min_gain", caps.min_gain},
-                        {"max_gain", caps.max_gain}
+                        {"max_gain", caps.max_gain},
+                        {"active_sensor_mode", caps.active_sensor_mode}
                     }}
                 };
 
@@ -213,7 +217,8 @@ bool HttpServer::start() {
                 {"min_exposure_us", caps.min_exposure_us},
                 {"max_exposure_us", caps.max_exposure_us},
                 {"min_gain", caps.min_gain},
-                {"max_gain", caps.max_gain}
+                {"max_gain", caps.max_gain},
+                {"active_sensor_mode", caps.active_sensor_mode}
             }},
             {"camera_metrics", {
                 {"sensor_fps", cm.sensor_fps},
@@ -229,7 +234,12 @@ bool HttpServer::start() {
             {"display_metrics", {
                 {"display_fps", dm.display_fps},
                 {"active_viewers", dm.active_viewers}
-            }}
+            }},
+            {"sensor_modes", {
+                {{"mode", 0}, {"label", "4K UHD (3840×2160 @ 30 FPS)"}, {"width", 3840}, {"height", 2160}, {"fps", 30.0}},
+                {{"mode", 1}, {"label", "Full HD (1920×1080 @ 60 FPS)"}, {"width", 1920}, {"height", 1080}, {"fps", 60.0}},
+                {{"mode", 2}, {"label", "120 FPS 초고속 (1332×990 @ 120 FPS)"}, {"width", 1332}, {"height", 990}, {"fps", 120.0}}
+            }},
         };
         res.set_content(state.dump(2), "application/json");
     });
@@ -258,6 +268,36 @@ bool HttpServer::start() {
         } catch (const std::exception& e) {
             res.status = 400;
             res.set_content(std::string("{\"error\":\"") + e.what() + "\"}", "application/json");
+        }
+    });
+
+    // 5b. API: POST /api/sensor_mode
+    impl_->svr.Post("/api/sensor_mode", [this](const httplib::Request& req, httplib::Response& res) {
+        try {
+            json j = json::parse(req.body);
+            int mode = j.value("mode", 2);
+            if (mode < 0 || mode > 2) {
+                res.status = 400;
+                res.set_content("{\"status\":\"error\",\"error\":\"mode must be 0, 1, or 2\"}", "application/json");
+                return;
+            }
+            if (impl_->camera.set_sensor_mode(mode)) {
+                auto caps = impl_->camera.get_capabilities();
+                json out = {
+                    {"status", "ok"},
+                    {"mode", mode},
+                    {"width", caps.width},
+                    {"height", caps.height},
+                    {"target_fps", caps.target_fps}
+                };
+                res.set_content(out.dump(), "application/json");
+            } else {
+                res.status = 500;
+                res.set_content("{\"status\":\"error\",\"error\":\"Failed to switch sensor mode\"}", "application/json");
+            }
+        } catch (const std::exception& e) {
+            res.status = 400;
+            res.set_content(std::string("{\"status\":\"error\",\"error\":\"") + e.what() + "\"}", "application/json");
         }
     });
 
@@ -322,6 +362,90 @@ bool HttpServer::start() {
             }
         }
         res.set_content(list.dump(), "application/json");
+    });
+
+    // 7c. API: Video Recording
+    impl_->svr.Post("/api/record/start", [this](const httplib::Request&, httplib::Response& res) {
+        if (impl_->display.start_recording("recordings")) {
+            json resp = {
+                {"status", "ok"},
+                {"recording", true},
+                {"path", impl_->display.get_recording_path()}
+            };
+            res.set_content(resp.dump(), "application/json");
+        } else {
+            res.status = 500;
+            res.set_content("{\"status\":\"error\",\"error\":\"Failed to start recording\"}", "application/json");
+        }
+    });
+
+    impl_->svr.Post("/api/record/stop", [this](const httplib::Request&, httplib::Response& res) {
+        std::string path = impl_->display.get_recording_path();
+        uint64_t frames = impl_->display.get_recorded_frames();
+        bool ok = impl_->display.stop_recording();
+        json resp = {
+            {"status", ok ? "ok" : "error"},
+            {"recording", false},
+            {"path", path},
+            {"frames", frames}
+        };
+        res.set_content(resp.dump(), "application/json");
+    });
+
+    impl_->svr.Get("/api/record/status", [this](const httplib::Request&, httplib::Response& res) {
+        json resp = {
+            {"recording", impl_->display.is_recording()},
+            {"path", impl_->display.get_recording_path()},
+            {"frames", impl_->display.get_recorded_frames()}
+        };
+        res.set_content(resp.dump(), "application/json");
+    });
+
+    impl_->svr.Get("/api/recordings", [](const httplib::Request&, httplib::Response& res) {
+        namespace fs = std::filesystem;
+        json list = json::array();
+        std::error_code ec;
+        if (fs::exists("recordings", ec)) {
+            for (const auto& entry : fs::directory_iterator("recordings", ec)) {
+                if (entry.is_regular_file()) {
+                    std::string ext = entry.path().extension().string();
+                    if (ext == ".avi" || ext == ".mp4") {
+                        list.push_back({
+                            {"filename", entry.path().filename().string()},
+                            {"url", "/recordings/" + entry.path().filename().string()},
+                            {"size", (uint64_t)entry.file_size(ec)}
+                        });
+                    }
+                }
+            }
+        }
+        res.set_content(list.dump(), "application/json");
+    });
+
+    // 7d. API: Camera Calibration
+    impl_->svr.Post("/api/calibration/capture", [this](const httplib::Request&, httplib::Response& res) {
+        bool found = impl_->display.capture_calibration_frame();
+        json resp = {
+            {"status", "ok"},
+            {"chessboard_found", found},
+            {"frame_count", impl_->display.get_calibration_frame_count()}
+        };
+        res.set_content(resp.dump(), "application/json");
+    });
+
+    impl_->svr.Post("/api/calibration/compute", [this](const httplib::Request&, httplib::Response& res) {
+        json result = impl_->display.compute_calibration();
+        res.set_content(result.dump(2), "application/json");
+    });
+
+    impl_->svr.Post("/api/calibration/clear", [this](const httplib::Request&, httplib::Response& res) {
+        impl_->display.clear_calibration_frames();
+        res.set_content("{\"status\":\"ok\",\"frame_count\":0}", "application/json");
+    });
+
+    impl_->svr.Get("/api/calibration", [this](const httplib::Request&, httplib::Response& res) {
+        json calib = impl_->display.get_calibration();
+        res.set_content(calib.dump(2), "application/json");
     });
 
 

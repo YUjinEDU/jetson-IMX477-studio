@@ -5,530 +5,479 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Jetson IMX477 카메라 스튜디오 (120fps ISP)</title>
+  <title>IMX477 Cinema Studio</title>
   <link rel="stylesheet" href="style.css">
 </head>
-<body class="theme-light">
-  <!-- 상단 헤더 바 -->
-  <header class="app-header">
-    <div class="brand">
-      <span class="status-indicator" id="conn-pill" title="연결 상태"></span>
-      <h1 class="title">IMX477 STUDIO</h1>
-      <span class="badge badge-fps" id="badge-sensor-mode">1332&times;990 @ 120 FPS</span>
-      <span class="badge badge-shm">AI 연동 (SHM Ring)</span>
-    </div>
+<body class="theme-studio">
+  <!-- Top Global Bar -->
+  <header class="studio-header">
+    <div class="header-left">
+      <span class="status-dot connected" id="conn-pill" title="Hardware ISP Connected"></span>
+      <span class="studio-logo">IMX477 STUDIO</span>
 
-    <div class="header-actions">
-      <div class="preset-group">
-        <label for="preset-select" class="header-label">프리셋:</label>
-        <select id="preset-select">
-          <option value="">(불러오는 중...)</option>
-        </select>
-        <button id="btn-load-preset" class="btn btn-secondary" title="선택한 프리셋 적용">적용</button>
-        <button id="btn-save-preset" class="btn btn-secondary" title="현재 설정을 새 프리셋으로 저장">저장...</button>
+      <!-- Sensor Mode Selector (30p 4K / 60p FHD / 120p High-Speed) -->
+      <div class="seg-group" id="sensor-mode-group">
+        <button class="seg-btn" data-sensor-mode="0" title="4K UHD: 3840×2160 @ 30 FPS (초고해상도 디테일 분석)">4K 30P</button>
+        <button class="seg-btn" data-sensor-mode="1" title="FHD: 1920×1080 @ 60 FPS (고화질 표준 모니터링)">1080 60P</button>
+        <button class="seg-btn active" data-sensor-mode="2" title="High-Speed: 1332×990 @ 120 FPS (초고속 동체 추적 & 야구 분석)">990 120P</button>
       </div>
 
-      <button id="btn-shortcuts" class="btn btn-icon" title="키보드 단축키 안내 (?)">&#x2328; 단축키</button>
-      <button id="btn-snapshot" class="btn btn-primary" title="1332×990 고화질 원본 스냅샷 촬영 (스페이스바)">&#128247; 스냅샷 (Space)</button>
+      <span class="pill pill-muted" id="badge-shm" title="AI Shared Memory Ring Buffer">SHM /dev/shm</span>
+    </div>
+
+    <!-- Quick Telemetry Ticker -->
+    <div class="header-ticker">
+      <div class="ticker-item"><span class="ticker-k">FPS</span> <span class="ticker-v" id="metric-sensor-fps">120.0</span></div>
+      <div class="ticker-item"><span class="ticker-k">DROP</span> <span class="ticker-v success" id="metric-gaps">0</span></div>
+      <div class="ticker-item"><span class="ticker-k">TOTAL</span> <span class="ticker-v" id="metric-total-frames">0</span></div>
+      <div class="ticker-item"><span class="ticker-k">UPTIME</span> <span class="ticker-v" id="metric-uptime">00:00</span></div>
+    </div>
+
+    <!-- Right Global Actions -->
+    <div class="header-right">
+      <button id="btn-record" class="btn btn-rec" title="영상 녹화 시작/정지 (단축키 R)">
+        <span class="rec-dot"></span> <span id="rec-label">REC</span> <span id="rec-timer" style="display: none;">00:00</span>
+      </button>
+      <button id="btn-snapshot" class="btn btn-snap" title="스냅샷 캡처 (스페이스바)">SNAP (Space)</button>
+      <div class="header-divider"></div>
+      <select id="preset-select" class="select-clean" title="저장된 프리셋 불러오기">
+        <option value="">Preset...</option>
+      </select>
+      <button id="btn-load-preset" class="btn btn-ghost" title="선택한 프리셋 적용">Load</button>
+      <button id="btn-save-preset" class="btn btn-ghost" title="현재 설정을 프리셋으로 저장">Save</button>
+      <button id="btn-shortcuts" class="btn btn-icon" title="단축키 안내 (?)">?</button>
     </div>
   </header>
 
-  <!-- 메인 레이아웃: 왼쪽=설정창(컨트롤), 오른쪽=카메라 화면 및 모니터링 -->
-  <main class="studio-layout">
-    <!-- 왼쪽 컬럼: 설정 및 조작 패널 -->
-    <aside class="control-column">
-      <!-- 4종 탭 내비게이션 -->
-      <nav class="tab-nav">
-        <button class="tab-btn active" data-tab="tab-presets">⚡ 빠른 프리셋</button>
-        <button class="tab-btn" data-tab="tab-camera">⚙️ 기본 설정</button>
-        <button class="tab-btn" data-tab="tab-baseball">⚾ 야구 분석</button>
-        <button class="tab-btn" data-tab="tab-gallery">📁 갤러리</button>
+  <!-- Main 2-Column Workstation -->
+  <main class="studio-workstation">
+    <!-- Left Inspector (Controls & Settings) -->
+    <aside class="studio-inspector">
+      <nav class="inspector-tabs">
+        <button class="itab-btn active" data-tab="tab-exp">EXPOSURE</button>
+        <button class="itab-btn" data-tab="tab-color">COLOR / ISP</button>
+        <button class="itab-btn" data-tab="tab-blur">MOTION</button>
+        <button class="itab-btn" data-tab="tab-calib">CALIB</button>
+        <button class="itab-btn" data-tab="tab-media">MEDIA</button>
       </nav>
 
-      <!-- 탭 1: 빠른 촬영 프리셋 (원클릭 환경 맞춤) -->
-      <div class="tab-pane active" id="tab-presets">
-        <div class="card">
-          <div class="card-header">
-            <div>
-              <h3>원클릭 촬영 프리셋</h3>
-              <p class="card-desc">상황에 맞는 버튼을 누르면 최적의 노출, 게인, 화이트밸런스가 즉시 적용됩니다.</p>
-            </div>
-          </div>
-
-          <div class="preset-cards-grid">
-            <div class="preset-card-item" id="pcard-daylight">
-              <div class="pcard-header">
-                <span class="pcard-icon">☀️</span>
-                <span class="pcard-title">주간 / 야외 고속</span>
+      <div class="inspector-body">
+        <!-- TAB 1: EXPOSURE & SENSOR -->
+        <div class="itab-pane active" id="tab-exp">
+          <div class="panel-section">
+            <div class="section-row">
+              <span class="section-title">EXPOSURE CONTROL</span>
+              <div class="seg-group seg-sm">
+                <label class="seg-btn"><input type="radio" name="ae-mode" value="manual" checked hidden> 수동 (MANUAL)</label>
+                <label class="seg-btn"><input type="radio" name="ae-mode" value="auto" hidden> 자동 (AUTO)</label>
               </div>
-              <p class="pcard-desc">밝은 실외나 조명이 좋은 환경. 노출 2ms, 게인 1.5×로 노이즈 없는 선명한 화질을 제공합니다.</p>
-              <button class="btn btn-preset-apply" data-preset-action="daylight">이 설정 적용</button>
             </div>
 
-            <div class="preset-card-item" id="pcard-indoor">
-              <div class="pcard-header">
-                <span class="pcard-icon">💡</span>
-                <span class="pcard-title">실내 조명 (형광등/LED)</span>
+            <!-- Shutter Speed -->
+            <div class="control-box" id="manual-exp-group">
+              <div class="ctrl-header">
+                <span class="ctrl-name">셔터 노출 시간 (SHUTTER EXPOSURE)</span>
+                <span class="ctrl-val"><strong id="val-exp-us">4000</strong> &micro;s <span class="ctrl-sub" id="val-exp-ms">4.00 ms</span></span>
               </div>
-              <p class="pcard-desc">실내 60Hz 조명 깜빡임(플리커)을 방지하고, 노출 4ms, 게인 2.5×로 적정 밝기를 맞춥니다.</p>
-              <button class="btn btn-preset-apply" data-preset-action="indoor">이 설정 적용</button>
+              <p class="ctrl-desc">센서가 빛을 받는 시간입니다. 짧을수록(0.5ms~1.0ms) 빠르게 움직이는 물체(야구공)가 잔상 없이 선명하게 잡히지만 화면이 어두워집니다.</p>
+              <input type="range" id="range-exp" min="13" max="8333" step="10" value="4000" class="studio-slider">
+              <div class="seg-group seg-xs">
+                <button class="seg-btn btn-chip" data-exp="500">0.5ms (초고속)</button>
+                <button class="seg-btn btn-chip" data-exp="1000">1.0ms (투구추적)</button>
+                <button class="seg-btn btn-chip" data-exp="2000">2.0ms (스포츠)</button>
+                <button class="seg-btn btn-chip active" data-exp="4000">4.0ms (표준)</button>
+                <button class="seg-btn btn-chip" data-exp="8000">8.0ms (최대밝기)</button>
+              </div>
             </div>
 
-            <div class="preset-card-item" id="pcard-baseball">
-              <div class="pcard-header">
-                <span class="pcard-icon">⚾</span>
-                <span class="pcard-title">야구 투구 초고속 추적</span>
+            <!-- Analog Gain -->
+            <div class="control-box" id="manual-gain-group">
+              <div class="ctrl-header">
+                <span class="ctrl-name">아날로그 감도 증폭 (ANALOG GAIN)</span>
+                <span class="ctrl-val"><strong id="val-gain">2.00</strong>&times;</span>
               </div>
-              <p class="pcard-desc">시속 150km 강속구의 실밥까지 선명하게 포착. 1ms 초고속 셔터와 4× 게인을 적용합니다.</p>
-              <button class="btn btn-preset-apply" data-preset-action="baseball">이 설정 적용</button>
+              <p class="ctrl-desc">센서의 물리적 신호 증폭(감도)입니다. 어두운 환경에서 밝기를 보강할 때 올리며, 8× 이상에서는 화면에 노이즈가 생길 수 있습니다.</p>
+              <input type="range" id="range-gain" min="1.0" max="22.25" step="0.25" value="2.0" class="studio-slider">
+              <div class="seg-group seg-xs">
+                <button class="seg-btn btn-chip" data-gain="1.0">1.0&times; (깨끗함)</button>
+                <button class="seg-btn btn-chip active" data-gain="2.0">2.0&times; (기본)</button>
+                <button class="seg-btn btn-chip" data-gain="4.0">4.0&times; (실내)</button>
+                <button class="seg-btn btn-chip" data-gain="8.0">8.0&times; (어두움)</button>
+                <button class="seg-btn btn-chip" data-gain="16.0">16.0&times; (최대)</button>
+              </div>
             </div>
 
-            <div class="preset-card-item" id="pcard-lowlight">
-              <div class="pcard-header">
-                <span class="pcard-icon">🌙</span>
-                <span class="pcard-title">어두운 실내 / 저조도</span>
+            <!-- AE Limits (in Auto mode) -->
+            <div class="control-box" id="ae-options" style="display: none;">
+              <div class="ctrl-header">
+                <span class="ctrl-name">자동 노출 최대 셔터 상한</span>
+                <span class="ctrl-val" id="val-ae-max-exp">8000 &micro;s</span>
               </div>
-              <p class="pcard-desc">조명이 어두울 때 화면 밝기를 극대화. 8ms 최대 셔터와 8× 아날로그 게인을 적용합니다.</p>
-              <button class="btn btn-preset-apply" data-preset-action="lowlight">이 설정 적용</button>
+              <input type="range" id="range-ae-max-exp" min="500" max="8333" step="100" value="8000" class="studio-slider">
+
+              <div class="ctrl-header" style="margin-top: 10px;">
+                <span class="ctrl-name">자동 노출 최대 게인 상한</span>
+                <span class="ctrl-val" id="val-ae-max-gain">16.0&times;</span>
+              </div>
+              <input type="range" id="range-ae-max-gain" min="1.0" max="22.25" step="0.5" value="16.0" class="studio-slider">
+
+              <label class="studio-check" style="margin-top: 8px;">
+                <input type="checkbox" id="chk-ae-lock"> AE Lock (현재 자동 노출 수치 고정)
+              </label>
             </div>
 
-            <div class="preset-card-item" id="pcard-focus">
-              <div class="pcard-header">
-                <span class="pcard-icon">🔍</span>
-                <span class="pcard-title">수동 렌즈 초점 맞춤 모드</span>
+            <!-- EV Compensation -->
+            <div class="control-box">
+              <div class="ctrl-header">
+                <span class="ctrl-name">전체 노출 보정 (EV COMPENSATION)</span>
+                <span class="ctrl-val" id="val-ev">0.0 EV</span>
               </div>
-              <p class="pcard-desc">중앙 2배 확대 및 초록색 포커스 피킹을 켜서 렌즈 링을 돌릴 때 초점을 미세하게 맞춥니다.</p>
-              <button class="btn btn-preset-apply" data-preset-action="focus">이 설정 적용</button>
+              <p class="ctrl-desc">화면 전체 밝기 톤을 단계별(+/-)로 한 단계 밝게 또는 어둡게 보정합니다.</p>
+              <input type="range" id="range-ev" min="-2.0" max="2.0" step="0.25" value="0.0" class="studio-slider">
+            </div>
+
+            <div class="control-box">
+              <div class="row-between">
+                <div>
+                  <span class="ctrl-name">플리커 방지 (ANTIBANDING)</span>
+                  <p class="ctrl-desc">실내 형광등/LED 교류(AC) 전원에 의한 가로 줄무늬를 제거합니다. 한국은 60Hz를 권장합니다.</p>
+                </div>
+                <select id="select-antibanding" class="select-clean">
+                  <option value="auto">자동 감지 (Auto)</option>
+                  <option value="60hz" selected>60 Hz (대한민국 / 북미)</option>
+                  <option value="50hz">50 Hz (유럽 / 중국 / 일본)</option>
+                  <option value="off">끔 (Off)</option>
+                </select>
+              </div>
             </div>
           </div>
         </div>
-      </div>
 
-      <!-- 탭 2: 기본 촬영 설정 (친절한 한글 안내) -->
-      <div class="tab-pane" id="tab-camera">
-        <!-- 노출 & 게인 카드 -->
-        <div class="card">
-          <div class="card-header">
-            <div>
-              <h3>노출 시간 &amp; 센서 감도(게인)</h3>
-              <p class="card-desc">화면의 밝기와 셔터 속도를 수동으로 정밀하게 조절합니다.</p>
-            </div>
-            <div class="toggle-mode">
-              <label class="radio-chip"><input type="radio" name="ae-mode" value="manual" checked> 수동 (Manual)</label>
-              <label class="radio-chip"><input type="radio" name="ae-mode" value="auto"> 자동 (Auto AE)</label>
-            </div>
-          </div>
+        <!-- TAB 2: COLOR & ISP -->
+        <div class="itab-pane" id="tab-color">
+          <div class="panel-section">
+            <span class="section-title">화이트 밸런스 &amp; ISP 색감 (WHITE BALANCE)</span>
+            <p class="section-hint">조명 색온도(형광등, 태양광 등)에 맞춰 흰색을 왜곡 없는 순수한 흰색으로 보정합니다.</p>
 
-          <!-- 수동 노출 -->
-          <div class="control-group" id="manual-exp-group">
-            <div class="control-label-row">
-              <div>
-                <label for="range-exp" class="control-title">셔터 노출 시간 (Exposure)</label>
-                <span class="help-text">카메라가 빛을 받는 시간입니다. 짧을수록 빠르게 움직이는 물체가 선명해지지만 화면이 어두워집니다.</span>
+            <div class="control-box">
+              <div class="row-between">
+                <span class="ctrl-name">화이트 밸런스 모드</span>
+                <select id="select-awb" class="select-clean">
+                  <option value="auto" selected>자동 (Auto AWB)</option>
+                  <option value="daylight">맑은 날 태양광 (5500K)</option>
+                  <option value="cloudy">흐린 날 야외 (6500K)</option>
+                  <option value="fluorescent">실내 형광등 (4000K)</option>
+                  <option value="incandescent">주황색 백열등 (3200K)</option>
+                  <option value="shade">그늘진 곳 (7500K)</option>
+                  <option value="off">수동 고정 (Off)</option>
+                </select>
               </div>
-              <div class="val-display">
-                <span id="val-exp-us">4000 &micro;s</span>
-                <span class="val-sub" id="val-exp-ms">(4.00 ms)</span>
+
+              <div class="row-between" style="margin-top: 6px;">
+                <label class="studio-check">
+                  <input type="checkbox" id="chk-awb-lock"> AWB Lock (현재 색온도 고정)
+                </label>
+                <span class="ticker-v">실측 색온도: <strong id="val-actual-cct">-- K</strong></span>
               </div>
             </div>
-            <input type="range" id="range-exp" min="13" max="8333" step="10" value="4000">
-            <div class="quick-btns">
-              <button class="btn-chip" data-exp="500" title="0.5ms (초고속)">0.5ms (초고속)</button>
-              <button class="btn-chip" data-exp="1000" title="1.0ms (야구 투구)">1.0ms (투구)</button>
-              <button class="btn-chip" data-exp="2000" title="2.0ms (스포츠)">2.0ms (스포츠)</button>
-              <button class="btn-chip active" data-exp="4000" title="4.0ms (표준)">4.0ms (표준)</button>
-              <button class="btn-chip" data-exp="8000" title="8.0ms (최대밝기)">8.0ms (최대)</button>
-            </div>
-          </div>
 
-          <!-- 수동 게인 -->
-          <div class="control-group" id="manual-gain-group">
-            <div class="control-label-row">
-              <div>
-                <label for="range-gain" class="control-title">센서 감도 증폭 (Analog Gain)</label>
-                <span class="help-text">어두운 환경에서 밝기를 물리적으로 증폭합니다. 너무 높이면(8×~16×) 지글거리는 노이즈가 생깁니다.</span>
+            <div class="control-box">
+              <div class="ctrl-header">
+                <span class="ctrl-name">ISP 디지털 게인</span>
+                <span class="ctrl-val" id="val-isp-gain">1.0&times;</span>
               </div>
-              <span class="val-display" id="val-gain">2.00&times;</span>
+              <p class="ctrl-desc">디지털 후처리 밝기 증폭기입니다. 화질 유지를 위해 기본값 1.0× 유지를 권장합니다.</p>
+              <input type="range" id="range-isp-gain" min="1.0" max="8.0" step="0.2" value="1.0" class="studio-slider">
             </div>
-            <input type="range" id="range-gain" min="1.0" max="22.25" step="0.25" value="2.0">
-            <div class="quick-btns">
-              <button class="btn-chip" data-gain="1.0">1&times; (깨끗함)</button>
-              <button class="btn-chip active" data-gain="2.0">2&times; (기본)</button>
-              <button class="btn-chip" data-gain="4.0">4&times; (실내)</button>
-              <button class="btn-chip" data-gain="8.0">8&times; (어두움)</button>
-              <button class="btn-chip" data-gain="16.0">16&times; (최대)</button>
-            </div>
-          </div>
 
-          <!-- 자동 노출 옵션 (AE 모드일 때만 표시) -->
-          <div class="control-subgroup" id="ae-options" style="display: none;">
-            <div class="control-label-row">
-              <label for="range-ae-max-exp" class="control-title">자동 노출 최대 상한선</label>
-              <span class="val-display" id="val-ae-max-exp">8000 &micro;s</span>
-            </div>
-            <input type="range" id="range-ae-max-exp" min="500" max="8333" step="100" value="8000">
-
-            <div class="control-label-row" style="margin-top: 10px;">
-              <label for="range-ae-max-gain" class="control-title">자동 노출 최대 게인</label>
-              <span class="val-display" id="val-ae-max-gain">16.0&times;</span>
-            </div>
-            <input type="range" id="range-ae-max-gain" min="1.0" max="22.25" step="0.5" value="16.0">
-
-            <div class="checkbox-row" style="margin-top: 10px;">
-              <label><input type="checkbox" id="chk-ae-lock"> 현재 노출 상태 고정 (AE Lock)</label>
-            </div>
-          </div>
-
-          <!-- EV 노출 보정 -->
-          <div class="control-group">
-            <div class="control-label-row">
-              <div>
-                <label for="range-ev" class="control-title">전체 노출 보정 (EV)</label>
-                <span class="help-text">화면 전체 밝기를 단계별로 한 톤 밝게 또는 어둡게 보정합니다.</span>
+            <div class="grid-2col">
+              <div class="control-box">
+                <span class="ctrl-name">하드웨어 노이즈 제거</span>
+                <p class="ctrl-desc">저조도 노이즈 억제 강도</p>
+                <select id="select-denoise" class="select-clean" style="width: 100%; margin-top: 6px;">
+                  <option value="off">끄기 (Off)</option>
+                  <option value="fast" selected>빠름 (Fast, 권장)</option>
+                  <option value="high_quality">고품질 (High Quality)</option>
+                </select>
               </div>
-              <span class="val-display" id="val-ev">0.0 EV</span>
+              <div class="control-box">
+                <span class="ctrl-name">윤곽선 선명화 (샤프닝)</span>
+                <p class="ctrl-desc">경계면 선명도 강화</p>
+                <select id="select-edge" class="select-clean" style="width: 100%; margin-top: 6px;">
+                  <option value="off">끄기 (Off)</option>
+                  <option value="fast" selected>빠름 (Fast, 권장)</option>
+                  <option value="high_quality">고품질 (High Quality)</option>
+                </select>
+              </div>
             </div>
-            <input type="range" id="range-ev" min="-2.0" max="2.0" step="0.25" value="0.0">
-          </div>
-
-          <!-- 플리커 방지 -->
-          <div class="control-row">
-            <div>
-              <label for="select-antibanding" class="control-title">조명 깜빡임 방지 (플리커 제거):</label>
-              <span class="help-text">교류 전원(AC) 조명 아래에서 생기는 가로 줄무늬를 제거합니다. 한국은 60Hz를 권장합니다.</span>
-            </div>
-            <select id="select-antibanding" class="select-styled">
-              <option value="auto">자동 감지 (Auto)</option>
-              <option value="60hz" selected>60 Hz (대한민국 / 북미 표준)</option>
-              <option value="50hz">50 Hz (유럽 / 중국 / 일본 일부)</option>
-              <option value="off">끄기 (Off)</option>
-            </select>
           </div>
         </div>
 
-        <!-- 색감 & 화이트 밸런스 카드 -->
-        <div class="card">
-          <div class="card-header">
-            <div>
-              <h3>색감 &amp; 화이트 밸런스</h3>
-              <p class="card-desc">조명 색온도에 맞춰 흰색을 순수한 흰색으로 보정합니다.</p>
-            </div>
-          </div>
+        <!-- TAB 3: MOTION BLUR CALCULATOR -->
+        <div class="itab-pane" id="tab-blur">
+          <div class="panel-section">
+            <span class="section-title">야구 투구 모션 블러(잔상) 분석기</span>
+            <p class="section-hint">공이 날아갈 때 셔터가 열려있는 동안 발생하는 이동 거리(잔상 cm)를 계산하고, 실밥 포착에 필요한 최적 셔터를 제시합니다.</p>
 
-          <div class="control-row">
-            <div>
-              <label for="select-awb" class="control-title">화이트 밸런스 모드:</label>
-              <span class="help-text">조명 종류에 맞는 프리셋을 고르세요.</span>
-            </div>
-            <select id="select-awb" class="select-styled">
-              <option value="auto" selected>자동 (Auto AWB)</option>
-              <option value="daylight">맑은 날 태양광 (Daylight)</option>
-              <option value="cloudy">흐린 날 야외 (Cloudy)</option>
-              <option value="fluorescent">실내 형광등 (Fluorescent)</option>
-              <option value="incandescent">주황색 백열등 (Incandescent)</option>
-              <option value="shade">그늘진 곳 (Shade)</option>
-              <option value="off">수동 고정 (Off)</option>
-            </select>
-          </div>
-
-          <div class="checkbox-row">
-            <label><input type="checkbox" id="chk-awb-lock"> 현재 색감 고정 (AWB Lock)</label>
-            <span class="metadata-cct">측정 색온도: <strong id="val-actual-cct">-- K</strong></span>
-          </div>
-
-          <div class="control-group" style="margin-top: 12px;">
-            <div class="control-label-row">
-              <div>
-                <label for="range-isp-gain" class="control-title">ISP 디지털 게인</label>
-                <span class="help-text">디지털 후처리 밝기 증폭입니다. 1.0×(기본값) 유지를 권장합니다.</span>
+            <div class="control-box">
+              <div class="row-between">
+                <div>
+                  <span class="ctrl-name">목표 투구 구속 (km/h)</span>
+                  <p class="ctrl-desc">분석 대상 투수의 구속을 선택하세요.</p>
+                </div>
+                <div class="num-unit">
+                  <input type="number" id="input-ball-speed" value="145" min="10" max="300" step="5" class="input-clean">
+                  <span class="ctrl-sub" id="calc-speed-ms">40.3 m/s</span>
+                </div>
               </div>
-              <span class="val-display" id="val-isp-gain">1.0&times;</span>
-            </div>
-            <input type="range" id="range-isp-gain" min="1.0" max="8.0" step="0.2" value="1.0">
-          </div>
 
-          <div class="control-row-grid" style="margin-top: 12px;">
-            <div>
-              <label for="select-denoise" class="control-title">하드웨어 노이즈 제거:</label>
-              <select id="select-denoise" class="select-styled">
-                <option value="off">끄기 (Off)</option>
-                <option value="fast" selected>빠름 (Fast, 권장)</option>
-                <option value="high_quality">고품질 (High Quality)</option>
-              </select>
-            </div>
-            <div>
-              <label for="select-edge" class="control-title">윤곽선 선명화 (샤프닝):</label>
-              <select id="select-edge" class="select-styled">
-                <option value="off">끄기 (Off)</option>
-                <option value="fast" selected>빠름 (Fast, 권장)</option>
-                <option value="high_quality">고품질 (High Quality)</option>
-              </select>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 탭 3: 야구 투구 특화 분석 (독립 탭) -->
-      <div class="tab-pane" id="tab-baseball">
-        <div class="card blur-calc-card">
-          <div class="card-header">
-            <div>
-              <h3>⚾ 야구 투구 모션 블러(잔상) 분석기</h3>
-              <p class="card-desc">구속별로 카메라 센서에 남는 공의 잔상 길이를 시각적으로 계산하고 최적 셔터를 안내합니다.</p>
-            </div>
-          </div>
-
-          <!-- 친절한 원리 안내 박스 -->
-          <div class="guide-box">
-            <div class="guide-title">💡 모션 블러(잔상)가 왜 생기고 어떻게 없애나요?</div>
-            <p class="guide-text">
-              시속 150km로 날아가는 야구공은 1초에 <strong>41.6m</strong>를 이동합니다.<br>
-              셔터가 4.0ms 동안 열려있으면 공은 셔터가 열려있는 동안 <strong>약 16.6cm</strong> 이동하므로, 사진에 타원형 잔상으로 찍힙니다.<br>
-              셔터 시간을 <strong>1.0ms 이하</strong>로 낮추면 이동 거리가 4cm 이하로 줄어들어 <strong>공의 실밥까지 선명하게</strong> 포착할 수 있습니다!
-            </p>
-          </div>
-
-          <div class="blur-calc-body">
-            <div class="calc-row">
-              <div>
-                <label for="input-ball-speed" class="control-title">야구공 투구 구속 (km/h):</label>
-                <span class="help-text">분석하려는 투수의 구속을 선택하세요.</span>
-              </div>
-              <div class="input-with-hint">
-                <input type="number" id="input-ball-speed" value="145" min="10" max="300" step="5" class="input-styled">
-                <span class="calc-hint" id="calc-speed-ms">40.3 m/s</span>
+              <div class="seg-group seg-xs" style="margin-top: 6px;">
+                <button class="seg-btn btn-chip" data-speed="90">유소년 90</button>
+                <button class="seg-btn btn-chip" data-speed="130">고교 130</button>
+                <button class="seg-btn btn-chip active" data-speed="145">KBO 145</button>
+                <button class="seg-btn btn-chip" data-speed="160">MLB 160</button>
               </div>
             </div>
 
-            <!-- 빠른 구속 칩 버튼 -->
-            <div class="quick-btns" style="margin-top: 8px;">
-              <button class="btn-chip" data-speed="90">유소년 (90km/h)</button>
-              <button class="btn-chip" data-speed="130">고교생 (130km/h)</button>
-              <button class="btn-chip active" data-speed="145">KBO 프로 (145km/h)</button>
-              <button class="btn-chip" data-speed="160">MLB 100마일 (160km/h)</button>
-            </div>
-
-            <div class="calc-row" style="margin-top: 14px;">
-              <div>
-                <label for="input-fov-width" class="control-title">촬영 화각 폭 (FOV 폭, 미터):</label>
-                <span class="help-text">카메라 화면 가로 1332픽셀 안에 들어오는 실제 가로 폭(m)입니다.</span>
+            <div class="control-box">
+              <div class="row-between">
+                <div>
+                  <span class="ctrl-name">촬영 화각 가로 폭 (FOV Width)</span>
+                  <p class="ctrl-desc">화면 가로에 담기는 실제 거리(미터)입니다.</p>
+                </div>
+                <div class="num-unit">
+                  <input type="number" id="input-fov-width" value="3.0" min="0.5" max="50.0" step="0.5" class="input-clean">
+                  <span class="ctrl-sub">meters</span>
+                </div>
               </div>
-              <input type="number" id="input-fov-width" value="3.0" min="0.5" max="50.0" step="0.5" class="input-styled">
             </div>
 
-            <!-- 시각적 잔상 그래픽 -->
-            <div class="blur-graphic-wrap">
-              <div class="blur-graphic-label">
+            <!-- Streak meter -->
+            <div class="streak-track-wrap">
+              <div class="streak-meta">
                 <span>현재 셔터 속도 기준 공 잔상 길이 (실제 이동 거리)</span>
-                <span id="calc-blur-cm-badge" class="badge-blur">16.1 cm</span>
+                <span id="calc-blur-cm-badge" class="pill pill-danger">16.1 cm</span>
               </div>
-              <div class="blur-track">
-                <div class="blur-ball-icon">⚾</div>
-                <div class="blur-streak-line" id="blur-streak-line"></div>
-              </div>
-            </div>
-
-            <!-- 통계 수치 3종 -->
-            <div class="calc-results">
-              <div class="blur-stat">
-                <span class="stat-name">공 잔상 길이</span>
-                <span class="stat-val highlight" id="calc-blur-cm">-- cm</span>
-              </div>
-              <div class="blur-stat">
-                <span class="stat-name">화면 픽셀 번짐</span>
-                <span class="stat-val" id="calc-blur-px">-- px</span>
-              </div>
-              <div class="blur-stat">
-                <span class="stat-name">권장 셔터 스피드</span>
-                <span class="stat-val" id="calc-blur-rec">&le; 1.0 ms 권장</span>
+              <div class="streak-track">
+                <div class="streak-dot"></div>
+                <div class="streak-tail" id="blur-streak-line"></div>
               </div>
             </div>
 
-            <!-- 권장 설정 원클릭 적용 버튼 -->
-            <button id="btn-apply-rec-shutter" class="btn btn-primary" style="width: 100%; margin-top: 14px;">
-              ⚡ 이 구속에 최적화된 셔터(1.0ms) 및 게인(4×) 즉시 적용
+            <div class="blur-stats-grid">
+              <div class="bstat-card">
+                <span class="bstat-k">공 이동 잔상</span>
+                <span class="bstat-v highlight" id="calc-blur-cm">-- cm</span>
+              </div>
+              <div class="bstat-card">
+                <span class="bstat-k">센서 픽셀 번짐</span>
+                <span class="bstat-v" id="calc-blur-px">-- px</span>
+              </div>
+              <div class="bstat-card">
+                <span class="bstat-k">권장 셔터 속도</span>
+                <span class="bstat-v" id="calc-blur-rec">&le; 1.0 ms</span>
+              </div>
+            </div>
+
+            <button id="btn-apply-rec-shutter" class="btn btn-outline" style="width: 100%; margin-top: 8px;">
+              이 구속에 최적화된 셔터(1.0ms) 및 게인(4×) 적용
             </button>
           </div>
         </div>
-      </div>
 
-      <!-- 탭 4: 스냅샷 갤러리 -->
-      <div class="tab-pane" id="tab-gallery">
-        <div class="card">
-          <div class="card-header">
-            <div>
-              <h3>📁 저장된 고화질 스냅샷 (1332&times;990)</h3>
-              <p class="card-desc">스페이스바를 눌러 촬영한 원본 무손실 사진 목록입니다.</p>
+        <!-- TAB 4: CALIBRATION -->
+        <div class="itab-pane" id="tab-calib">
+          <div class="panel-section">
+            <span class="section-title">카메라 렌즈 왜곡 캘리브레이션</span>
+            <p class="section-hint">9×6 체커보드 패턴을 카메라 앞에 비추고 다양한 각도에서 3장 이상 캡처하면, 렌즈 왜곡(방사 왜곡 k1, k2)과 내부 카메라 행렬(초점거리 fx, fy, 주점 cx, cy)을 계산합니다.</p>
+
+            <div class="calib-action-box">
+              <div class="row-between">
+                <span class="ctrl-name">수집된 체커보드 프레임:</span>
+                <span class="ticker-v" id="calib-frame-count">0</span>
+              </div>
+              <div class="grid-2col" style="margin-top: 8px;">
+                <button id="btn-calib-capture" class="btn btn-outline" title="체커보드 패턴 인식 및 1장 캡처">패턴 캡처 (Capture)</button>
+                <button id="btn-calib-clear" class="btn btn-ghost" title="수집된 캡처 프레임 초기화">전체 초기화</button>
+              </div>
+              <button id="btn-calib-compute" class="btn btn-primary" style="width: 100%; margin-top: 8px;" title="왜곡 보정 파라미터 계산">
+                캘리브레이션 행렬 계산 (3장 이상 필요)
+              </button>
             </div>
-            <button id="btn-refresh-gallery" class="btn btn-secondary btn-xs">&#x21bb; 새로고침</button>
+
+            <div class="calib-result-box" id="calib-result-view">
+              <div class="result-line">상태: <strong id="calib-status-text">미측정 (Uncalibrated)</strong></div>
+              <div class="result-line">재투영 오차 (RMS Error): <strong id="calib-rms-text">-- px</strong></div>
+              <div class="calib-matrix-table" id="calib-matrix-grid">
+                <span>fx: --</span> <span>cx: --</span>
+                <span>fy: --</span> <span>cy: --</span>
+                <span>k1: --</span> <span>k2: --</span>
+              </div>
+            </div>
           </div>
-          <div class="gallery-container" id="gallery-container">
-            <p class="gallery-empty">저장된 스냅샷이 없습니다. 상단 '스냅샷' 버튼 또는 스페이스바를 누르세요.</p>
+        </div>
+
+        <!-- TAB 5: MEDIA & RECORDINGS -->
+        <div class="itab-pane" id="tab-media">
+          <div class="panel-section">
+            <div class="section-row">
+              <div>
+                <span class="section-title">미디어 보관함 (MEDIA)</span>
+                <p class="section-hint">스냅샷 사진(JPEG) 및 영상 녹화 파일(AVI) 목록입니다.</p>
+              </div>
+              <button id="btn-refresh-gallery" class="btn btn-ghost btn-xs">&#x21bb; 새로고침</button>
+            </div>
+
+            <div class="gallery-container" id="gallery-container">
+              <p class="gallery-empty">저장된 미디어가 없습니다. 상단 'SNAP' 또는 'REC' 버튼을 누르세요.</p>
+            </div>
           </div>
         </div>
       </div>
     </aside>
 
-    <!-- 오른쪽 컬럼: 실시간 카메라 뷰포트 & 모니터링 -->
-    <section class="viewport-column">
-      <!-- 실시간 KPI 성능 배너 -->
-      <div class="kpi-banner">
-        <div class="kpi-box">
-          <span class="kpi-label">센서 수신 속도</span>
-          <div class="kpi-val" id="metric-sensor-fps">120.0</div>
-          <span class="kpi-sub">FPS (목표 120)</span>
-        </div>
-        <div class="kpi-box">
-          <span class="kpi-label">호스트 처리 속도</span>
-          <div class="kpi-val" id="metric-host-fps">120.0</div>
-          <span class="kpi-sub">FPS monotonic</span>
-        </div>
-        <div class="kpi-box">
-          <span class="kpi-label">프레임 누락 (Gaps)</span>
-          <div class="kpi-val success" id="metric-gaps">0</div>
-          <span class="kpi-sub" id="metric-bad-iv">0 이상 감지</span>
-        </div>
-        <div class="kpi-box">
-          <span class="kpi-label">총 캡처 프레임</span>
-          <div class="kpi-val" id="metric-total-frames">--</div>
-          <span class="kpi-sub" id="metric-uptime">0분 0초</span>
-        </div>
-      </div>
-
-      <!-- 메인 비디오 뷰포트 카드 -->
+    <!-- Right Viewport Section -->
+    <section class="studio-viewport-area">
       <div class="viewport-card" id="viewport-card">
-        <div class="viewport-container" id="viewport-wrap">
-          <img id="stream-img" src="/stream.mjpg" alt="120fps ISP 비디오 스트림" crossorigin="anonymous">
+        <!-- Live Stream Canvas & Frame -->
+        <div class="viewport-frame" id="viewport-wrap">
+          <img id="stream-img" src="/stream.mjpg" alt="Live Camera Stream" crossorigin="anonymous">
           <canvas id="overlay-canvas"></canvas>
           <div id="shutter-flash" class="shutter-flash"></div>
 
-          <!-- 줌 미니맵 (PIP) 네비게이터 -->
+          <!-- Zoom Minimap PIP -->
           <div id="minimap-box" class="minimap-box" style="display: none;">
             <div id="minimap-crop-rect" class="minimap-crop-rect"></div>
           </div>
 
-          <!-- 실시간 HUD 정보 -->
-          <div class="viewport-hud" id="viewport-hud">
-            <span class="hud-item" id="hud-res">1332&times;990</span>
-            <span class="hud-item" id="hud-sensor">120.0 FPS SENSOR</span>
-            <span class="hud-item highlight" id="hud-fps">-- FPS VIEW</span>
-            <span class="hud-item" id="hud-zoom">ZOOM: FIT</span>
+          <!-- OSD Live HUD -->
+          <div class="viewport-osd">
+            <span class="osd-pill" id="hud-res">1332&times;990</span>
+            <span class="osd-pill" id="hud-sensor">120.0 FPS</span>
+            <span class="osd-pill" id="hud-fps">30 FPS VIEW</span>
+            <span class="osd-pill" id="hud-zoom">FIT</span>
+            <span class="osd-pill rec-pill" id="osd-rec-badge" style="display: none;">● REC</span>
           </div>
         </div>
 
-        <!-- 뷰포트 하단 툴바 -->
-        <div class="viewport-toolbar">
-          <div class="tool-group">
-            <span class="tool-label">줌 배율:</span>
-            <button class="btn-tool active" data-zoom="fit" title="전체 화면 맞춤">전체 (Fit)</button>
-            <button class="btn-tool" data-zoom="1x" title="1배율 100% 원본 픽셀 크롭">1배율 (1:1)</button>
-            <button class="btn-tool" data-zoom="2x" title="2배율 확대 (클릭한 위치로 중심 이동)">2&times; 줌</button>
-            <button class="btn-tool" data-zoom="4x" title="4배율 극단 확대 (초점 미세 조정)">4&times; 줌</button>
-          </div>
-
-          <div class="tool-group">
-            <span class="tool-label">초점/노출 보조:</span>
-            <div class="peaking-wrap">
-              <label class="toggle-pill" title="윤곽선 초점 피킹 켜기/끄기 (단축키 P)">
-                <input type="checkbox" id="chk-peaking"> 포커스 피킹
-              </label>
-              <select id="select-peaking-color" class="select-xs">
-                <option value="green" selected>초록</option>
-                <option value="red">빨강</option>
-                <option value="cyan">하늘</option>
-              </select>
+        <!-- Viewport Bottom Control Strip -->
+        <div class="viewport-strip">
+          <!-- Zoom Segments -->
+          <div class="strip-item">
+            <span class="strip-label">줌 배율 (ZOOM):</span>
+            <div class="seg-group seg-xs">
+              <button class="seg-btn btn-tool active" data-zoom="fit" title="화면 맞춤">FIT</button>
+              <button class="seg-btn btn-tool" data-zoom="1x" title="1배율 100% 원본 픽셀">1&times;</button>
+              <button class="seg-btn btn-tool" data-zoom="2x" title="2배 확대">2&times;</button>
+              <button class="seg-btn btn-tool" data-zoom="4x" title="4배 극단 확대 (초점 미세조정 전용)">4&times;</button>
             </div>
-            <label class="toggle-pill" title="빛이 번져 하얗게 날아간 영역 줄무늬 표시">
-              <input type="checkbox" id="chk-zebra"> 제브라 경고
-            </label>
-            <select id="select-grid" class="select-sm" title="뷰파인더 오버레이 격자망">
-              <option value="none">격자: 끔</option>
-              <option value="rule_of_thirds">3&times;3 3분할선</option>
-              <option value="crosshair">십자선 (+)</option>
+          </div>
+
+          <!-- Grid Overlays (Rule of thirds 9, 2-split, quad 4, crosshair, safe area) -->
+          <div class="strip-item">
+            <span class="strip-label">격자망 (GRID):</span>
+            <select id="select-grid" class="select-clean select-xs" title="뷰파인더 오버레이 격자">
+              <option value="none">격자 끔 (Off)</option>
+              <option value="rule_of_thirds">3&times;3 (9분할선)</option>
+              <option value="quad">2&times;2 (4분할선)</option>
+              <option value="center_split_v">좌우 수직 2분할</option>
+              <option value="center_split_h">상하 수평 2분할</option>
+              <option value="crosshair">정밀 십자선 (+)</option>
+              <option value="safe_area">방송용 안전영역 (Safe 90%)</option>
             </select>
           </div>
 
-          <div class="tool-group tool-group-right">
-            <select id="select-view-fps" class="select-sm" title="웹 브라우저 프리뷰 출력 프레임 조절">
-              <option value="15">프리뷰: 15 fps</option>
-              <option value="30" selected>프리뷰: 30 fps</option>
-              <option value="60">프리뷰: 60 fps</option>
+          <!-- Focus Peaking & Zebra -->
+          <div class="strip-item">
+            <label class="studio-check" title="윤곽선 초점 강조 피킹 (단축키 P)">
+              <input type="checkbox" id="chk-peaking"> 피킹 (PEAKING)
+            </label>
+            <select id="select-peaking-color" class="select-clean select-xs" title="피킹 강조 색상">
+              <option value="green" selected>초록</option>
+              <option value="red">빨강</option>
+              <option value="cyan">하늘</option>
             </select>
-            <button id="btn-fullscreen" class="btn-tool btn-icon" title="전체화면 전환 (단축키 F)">&#x26F6; 전체화면</button>
+            <label class="studio-check" title="빛이 번져 하얗게 날아간 영역 줄무늬 경고">
+              <input type="checkbox" id="chk-zebra"> 제브라 (ZEBRA)
+            </label>
+          </div>
+
+          <!-- Stream FPS Cap & Fullscreen -->
+          <div class="strip-item strip-right">
+            <select id="select-view-fps" class="select-clean select-xs" title="웹 브라우저 프리뷰 프레임 조절">
+              <option value="15">15 fps</option>
+              <option value="30" selected>30 fps</option>
+              <option value="60">60 fps</option>
+            </select>
+            <button id="btn-fullscreen" class="btn btn-ghost btn-xs" title="전체화면 전환 (단축키 F)">⛶ 전체화면</button>
           </div>
         </div>
       </div>
 
-      <!-- 실시간 정밀 계측기 3종 (친절한 한글 안내 포함) -->
-      <div class="instruments-grid">
-        <!-- 1. 60초 FPS 안정성 그래프 -->
-        <div class="instrument-card">
-          <div class="instrument-header">
+      <!-- Sleek Collapsible Telemetry Bar -->
+      <div class="telemetry-bar" id="telemetry-bar">
+        <div class="telem-item">
+          <div class="telem-header">
             <div>
-              <span class="instrument-title">⚡ 120 FPS 성능 안정성 (60초 히스토리)</span>
-              <span class="instrument-desc">120fps 점선 기준 프레임 드롭 없는지 실시간 감시</span>
+              <span class="telem-title">⚡ 120 FPS 성능 안정성 (60초 히스토리)</span>
+              <p class="ctrl-desc" style="margin-top:1px;">프레임 드롭(누락) 없는지 실시간 감시</p>
             </div>
-            <span id="sparkline-val" class="instrument-val">120.0 fps</span>
+            <span class="telem-v" id="sparkline-val">120.0 fps</span>
           </div>
-          <canvas id="fps-sparkline-canvas" width="300" height="42"></canvas>
+          <canvas id="fps-sparkline-canvas" width="280" height="34"></canvas>
         </div>
 
-        <!-- 2. 수동 초점 맞춤 도우미 (포커스 피크, 기존 라플라시안) -->
-        <div class="instrument-card">
-          <div class="instrument-header">
+        <div class="telem-item">
+          <div class="telem-header">
             <div>
-              <span class="instrument-title">🔍 수동 렌즈 초점 도우미 (Focus Peak)</span>
-              <span class="instrument-desc">수동 렌즈 링을 돌릴 때 숫자가 가장 높을 때 멈추세요!</span>
+              <span class="telem-title">🔍 수동 초점 도우미 (FOCUS PEAK)</span>
+              <p class="ctrl-desc" style="margin-top:1px;">렌즈 링을 돌릴 때 숫자가 가장 높을 때 멈추세요!</p>
             </div>
-            <span id="focus-score-val" class="instrument-val">--</span>
+            <span class="telem-v" id="focus-score-val">--</span>
           </div>
-          <div class="meter-bar-wrap">
+          <div class="meter-track">
             <div id="focus-meter-fill" class="meter-fill"></div>
             <div id="focus-meter-peak" class="meter-peak" title="최고 선명도 기억 마커"></div>
           </div>
         </div>
 
-        <!-- 3. 화면 밝기 분포도 (히스토그램, 기존 루마) -->
-        <div class="instrument-card">
-          <div class="instrument-header">
+        <div class="telem-item">
+          <div class="telem-header">
             <div>
-              <span class="instrument-title">📊 화면 밝기 분포도 (Exposure Histogram)</span>
-              <span class="instrument-desc">왼쪽(어두움) / 가운데(적정) / 오른쪽(너무 밝음)</span>
+              <span class="telem-title">📊 화면 밝기 분포도 (HISTOGRAM)</span>
+              <p class="ctrl-desc" style="margin-top:1px;">좌측(어두움) ↔ 가운데(적정) ↔ 우측(너무 밝음)</p>
             </div>
-            <span class="instrument-sub">0 &rarr; 255</span>
+            <span class="telem-v">0 &rarr; 255</span>
           </div>
-          <canvas id="histogram-canvas" width="300" height="42"></canvas>
+          <canvas id="histogram-canvas" width="280" height="34"></canvas>
         </div>
       </div>
     </section>
   </main>
 
-  <!-- 키보드 단축키 모달 -->
-  <div id="shortcuts-modal" class="modal-overlay" style="display: none;">
-    <div class="modal-card">
-      <div class="modal-header">
-        <h3>⌨ 키보드 단축키 안내</h3>
+  <!-- Keyboard Shortcuts Modal -->
+  <div id="shortcuts-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-dialog">
+      <div class="modal-head">
+        <h4>⌨ 키보드 단축키 안내 (SHORTCUTS)</h4>
         <button id="btn-close-modal" class="btn-close">&times;</button>
       </div>
-      <div class="modal-body">
-        <table class="shortcuts-table">
-          <tr><th>키</th><th>기능 설명</th></tr>
-          <tr><td><kbd>Space</kbd></td><td>1332&times;990 고화질 원본 스냅샷 촬영</td></tr>
-          <tr><td><kbd>F</kbd></td><td>전체화면 뷰파인더 켜기 / 끄기</td></tr>
-          <tr><td><kbd>Z</kbd></td><td>줌 모드 순환 (전체 &rarr; 1배율 &rarr; 2배율 &rarr; 4배율)</td></tr>
-          <tr><td><kbd>P</kbd></td><td>포커스 피킹 윤곽선 강조 켜기 / 끄기</td></tr>
-          <tr><td><kbd>1</kbd></td><td>0.5 ms 초고속 셔터 즉시 설정</td></tr>
-          <tr><td><kbd>2</kbd></td><td>1.0 ms 야구 투구 최적 셔터 즉시 설정</td></tr>
-          <tr><td><kbd>3</kbd></td><td>2.0 ms 스포츠 액션 셔터 즉시 설정</td></tr>
-          <tr><td><kbd>4</kbd></td><td>4.0 ms 표준 셔터 즉시 설정</td></tr>
+      <div class="modal-content">
+        <table class="kbd-table">
+          <tr><td><kbd>Space</kbd></td><td>고화질 원본 스냅샷 촬영</td></tr>
+          <tr><td><kbd>R</kbd></td><td>실시간 비디오 녹화 시작 / 정지</td></tr>
+          <tr><td><kbd>F</kbd></td><td>전체화면 뷰파인더 전환</td></tr>
+          <tr><td><kbd>Z</kbd></td><td>줌 배율 순환 (FIT &rarr; 1&times; &rarr; 2&times; &rarr; 4&times;)</td></tr>
+          <tr><td><kbd>P</kbd></td><td>포커스 피킹 윤곽선 강조 토글</td></tr>
+          <tr><td><kbd>1</kbd> - <kbd>4</kbd></td><td>퀵 셔터 노출 (0.5ms / 1.0ms / 2.0ms / 4.0ms)</td></tr>
           <tr><td><kbd>M</kbd></td><td>수동 / 자동 노출 즉시 전환</td></tr>
-          <tr><td><kbd>?</kbd></td><td>이 단축키 도움말 팝업 열기 / 닫기</td></tr>
+          <tr><td><kbd>?</kbd></td><td>단축키 도움말 팝업</td></tr>
         </table>
       </div>
     </div>
   </div>
 
-  <div id="toast" class="toast"></div>
+  <div id="toast" class="toast-bar"></div>
 
   <script src="app.js"></script>
 </body>

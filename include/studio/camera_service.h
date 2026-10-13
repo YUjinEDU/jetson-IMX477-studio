@@ -25,6 +25,7 @@ struct CameraCapabilities {
     float max_gain = 22.25f;
     float min_isp_gain = 1.0f;
     float max_isp_gain = 8.0f;
+    int active_sensor_mode = 2;
 };
 
 struct CameraControls {
@@ -70,7 +71,9 @@ public:
     CameraService();
     ~CameraService();
 
-    bool start(int ai_width = 320, const std::string& shm_name = STUDIO_SHM_NAME);
+    bool start(int ai_width = 320, const std::string& shm_name = STUDIO_SHM_NAME, int sensor_mode = 2);
+    bool set_sensor_mode(int mode_index);
+    int get_sensor_mode() const;
     void stop();
     bool is_running() const { return running_.load(); }
 

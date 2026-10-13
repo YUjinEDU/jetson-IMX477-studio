@@ -8,6 +8,9 @@ build/
 # Test outputs & temporary files
 snapshots/
 *.jpg
+recordings/
+*.avi
+*.mp4
 *.json.frames.csv
 /tmp/
 

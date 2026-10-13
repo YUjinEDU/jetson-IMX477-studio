@@ -121,7 +121,6 @@ void DisplayPipeline::run() {
     int frames_in_window = 0;
 
     const int target_w = 960;
-    const int target_h = 714;
     cv::Mat bgr, final_view;
     std::vector<uint8_t> encoded;
 
@@ -147,7 +146,13 @@ void DisplayPipeline::run() {
             std::lock_guard<std::mutex> lock(snapshot_mu_);
             need_snap = snapshot_requested_;
         }
-        if (viewers_count_.load() == 0 && !need_snap) {
+        bool is_rec = is_recording_.load();
+        bool is_calib = false;
+        {
+            std::lock_guard<std::mutex> clock(calib_mu_);
+            is_calib = calib_request_capture_;
+        }
+        if (viewers_count_.load() == 0 && !need_snap && !is_rec && !is_calib) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
@@ -160,8 +165,9 @@ void DisplayPipeline::run() {
         try {
         uint64_t t0 = now_ns();
         const auto& p = surface->surfaceList[0];
-        const uint32_t src_w = 1332;
-        const uint32_t src_h = 990;
+        const uint32_t src_w = p.width;
+        const uint32_t src_h = p.height;
+        const int target_h = (int)std::lround(960.0 * src_h / src_w) & ~1;
 
         if (!p.mappedAddr.addr[0] || !p.mappedAddr.addr[1]) {
             fprintf(stderr, "[DBG] Null mappedAddr!\n");
@@ -193,8 +199,8 @@ void DisplayPipeline::run() {
         cv::Mat full_bgr;
 
         if (s.zoom_mode == "1x" || s.zoom_mode == "2x" || s.zoom_mode == "4x") {
-            int crop_w = (s.zoom_mode == "1x") ? 960 : (s.zoom_mode == "4x") ? 240 : 480;
-            int crop_h = (s.zoom_mode == "1x") ? 714 : (s.zoom_mode == "4x") ? 178 : 356;
+            int crop_w = ((s.zoom_mode == "1x") ? target_w : src_w / (s.zoom_mode == "4x" ? 4 : 2)) & ~1;
+            int crop_h = ((s.zoom_mode == "1x") ? target_h : src_h / (s.zoom_mode == "4x" ? 4 : 2)) & ~1;
             int rx = std::clamp((int)(s.center_x * src_w) - crop_w / 2, 0, (int)src_w - crop_w) & ~1;
             int ry = std::clamp((int)(s.center_y * src_h) - crop_h / 2, 0, (int)src_h - crop_h) & ~1;
 
@@ -324,18 +330,69 @@ void DisplayPipeline::run() {
         }
 
         // 6. Overlays: Grid / Crosshair
+        // 6. Overlays: Grid / Splits / Crosshair / Safe Area
         if (s.grid_mode == "crosshair") {
             int mid_x = bgr.cols / 2;
             int mid_y = bgr.rows / 2;
-            cv::line(bgr, cv::Point(mid_x - 15, mid_y), cv::Point(mid_x + 15, mid_y), cv::Scalar(180, 180, 180), 1);
-            cv::line(bgr, cv::Point(mid_x, mid_y - 15), cv::Point(mid_x, mid_y + 15), cv::Scalar(180, 180, 180), 1);
+            cv::line(bgr, cv::Point(mid_x - 20, mid_y), cv::Point(mid_x + 20, mid_y), cv::Scalar(0, 255, 255), 1);
+            cv::line(bgr, cv::Point(mid_x, mid_y - 20), cv::Point(mid_x, mid_y + 20), cv::Scalar(0, 255, 255), 1);
+            cv::circle(bgr, cv::Point(mid_x, mid_y), 3, cv::Scalar(0, 255, 255), 1);
         } else if (s.grid_mode == "rule_of_thirds") {
             int x1 = bgr.cols / 3, x2 = 2 * bgr.cols / 3;
             int y1 = bgr.rows / 3, y2 = 2 * bgr.rows / 3;
-            cv::line(bgr, cv::Point(x1, 0), cv::Point(x1, bgr.rows), cv::Scalar(100, 100, 100), 1);
-            cv::line(bgr, cv::Point(x2, 0), cv::Point(x2, bgr.rows), cv::Scalar(100, 100, 100), 1);
-            cv::line(bgr, cv::Point(0, y1), cv::Point(bgr.cols, y1), cv::Scalar(100, 100, 100), 1);
-            cv::line(bgr, cv::Point(0, y2), cv::Point(bgr.cols, y2), cv::Scalar(100, 100, 100), 1);
+            cv::line(bgr, cv::Point(x1, 0), cv::Point(x1, bgr.rows), cv::Scalar(180, 180, 180), 1);
+            cv::line(bgr, cv::Point(x2, 0), cv::Point(x2, bgr.rows), cv::Scalar(180, 180, 180), 1);
+            cv::line(bgr, cv::Point(0, y1), cv::Point(bgr.cols, y1), cv::Scalar(180, 180, 180), 1);
+            cv::line(bgr, cv::Point(0, y2), cv::Point(bgr.cols, y2), cv::Scalar(180, 180, 180), 1);
+        } else if (s.grid_mode == "quad") {
+            int mid_x = bgr.cols / 2;
+            int mid_y = bgr.rows / 2;
+            cv::line(bgr, cv::Point(mid_x, 0), cv::Point(mid_x, bgr.rows), cv::Scalar(180, 180, 180), 1);
+            cv::line(bgr, cv::Point(0, mid_y), cv::Point(bgr.cols, mid_y), cv::Scalar(180, 180, 180), 1);
+        } else if (s.grid_mode == "center_split_v") {
+            int mid_x = bgr.cols / 2;
+            cv::line(bgr, cv::Point(mid_x, 0), cv::Point(mid_x, bgr.rows), cv::Scalar(0, 220, 255), 1);
+        } else if (s.grid_mode == "center_split_h") {
+            int mid_y = bgr.rows / 2;
+            cv::line(bgr, cv::Point(0, mid_y), cv::Point(bgr.cols, mid_y), cv::Scalar(0, 220, 255), 1);
+        } else if (s.grid_mode == "safe_area") {
+            int mx = bgr.cols / 10, my = bgr.rows / 10;
+            cv::rectangle(bgr, cv::Rect(mx, my, bgr.cols - 2 * mx, bgr.rows - 2 * my), cv::Scalar(160, 160, 160), 1);
+            cv::line(bgr, cv::Point(bgr.cols / 2 - 12, bgr.rows / 2), cv::Point(bgr.cols / 2 + 12, bgr.rows / 2), cv::Scalar(160, 160, 160), 1);
+            cv::line(bgr, cv::Point(bgr.cols / 2, bgr.rows / 2 - 12), cv::Point(bgr.cols / 2, bgr.rows / 2 + 12), cv::Scalar(160, 160, 160), 1);
+        }
+
+        // Video recording frame write
+        if (is_recording_.load()) {
+            std::lock_guard<std::mutex> rlock(record_mu_);
+            if (record_writer_.isOpened()) {
+                record_writer_.write(bgr);
+                recorded_frames_.fetch_add(1);
+            }
+        }
+
+        // Calibration capture check
+        {
+            std::lock_guard<std::mutex> clock(calib_mu_);
+            if (calib_request_capture_) {
+                cv::Mat calib_gray;
+                if (gray.empty()) cv::cvtColor(bgr, calib_gray, cv::COLOR_BGR2GRAY);
+                else calib_gray = gray;
+                cv::Size board_size(9, 6);
+                std::vector<cv::Point2f> corners;
+                bool found = cv::findChessboardCorners(calib_gray, board_size, corners,
+                                                       cv::CALIB_CB_ADAPTIVE_THRESH | cv::CALIB_CB_FAST_CHECK | cv::CALIB_CB_NORMALIZE_IMAGE);
+                if (found) {
+                    cv::cornerSubPix(calib_gray, corners, cv::Size(11, 11), cv::Size(-1, -1),
+                                     cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.1));
+                    calib_corners_all_.push_back(corners);
+                    calib_image_size_ = calib_gray.size();
+                }
+                calib_corners_found_last_ = found;
+                calib_capture_done_ = true;
+                calib_request_capture_ = false;
+                calib_cv_.notify_all();
+            }
         }
 
         // 7. JPEG Encode
@@ -392,4 +449,135 @@ std::string DisplayPipeline::capture_snapshot(const std::string& directory) {
         return "";
     }
     return snapshot_result_path_;
+}
+
+bool DisplayPipeline::start_recording(const std::string& directory) {
+    if (!running_.load()) return false;
+    std::lock_guard<std::mutex> lock(record_mu_);
+    if (is_recording_.load()) return false;
+
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+
+    auto t = std::time(nullptr);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    std::ostringstream ss;
+    ss << directory << "/rec_" << std::put_time(&tm, "%Y%m%d_%H%M%S") << ".avi";
+    record_path_ = ss.str();
+
+    auto caps = camera_.get_capabilities();
+    int target_w = 960;
+    int target_h = (int)std::lround(960.0 * caps.height / caps.width) & ~1;
+
+    bool ok = record_writer_.open(record_path_, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'),
+                                  30.0, cv::Size(target_w, target_h));
+    if (!ok) {
+        record_path_.clear();
+        return false;
+    }
+    recorded_frames_.store(0);
+    record_start_time_ns_ = now_ns();
+    is_recording_.store(true);
+    return true;
+}
+
+bool DisplayPipeline::stop_recording() {
+    std::lock_guard<std::mutex> lock(record_mu_);
+    if (!is_recording_.load()) return false;
+    is_recording_.store(false);
+    if (record_writer_.isOpened()) {
+        record_writer_.release();
+    }
+    return true;
+}
+
+bool DisplayPipeline::is_recording() const {
+    return is_recording_.load();
+}
+
+std::string DisplayPipeline::get_recording_path() const {
+    std::lock_guard<std::mutex> lock(record_mu_);
+    return record_path_;
+}
+
+uint64_t DisplayPipeline::get_recorded_frames() const {
+    return recorded_frames_.load();
+}
+
+bool DisplayPipeline::capture_calibration_frame() {
+    if (!running_.load()) return false;
+    std::unique_lock<std::mutex> lock(calib_mu_);
+    calib_request_capture_ = true;
+    calib_capture_done_ = false;
+    if (!calib_cv_.wait_for(lock, std::chrono::milliseconds(2000), [&] { return calib_capture_done_ || !running_.load(); })) {
+        calib_request_capture_ = false;
+        return false;
+    }
+    return calib_corners_found_last_;
+}
+
+void DisplayPipeline::clear_calibration_frames() {
+    std::lock_guard<std::mutex> lock(calib_mu_);
+    calib_corners_all_.clear();
+}
+
+int DisplayPipeline::get_calibration_frame_count() const {
+    std::lock_guard<std::mutex> lock(calib_mu_);
+    return (int)calib_corners_all_.size();
+}
+
+nlohmann::json DisplayPipeline::compute_calibration() {
+    std::lock_guard<std::mutex> lock(calib_mu_);
+    if (calib_corners_all_.size() < 3) {
+        return {{"status", "error"}, {"error", "Need at least 3 calibration frames with detected chessboard"}};
+    }
+
+    cv::Size board_size(9, 6);
+    float square_size_mm = 25.0f;
+
+    std::vector<std::vector<cv::Point3f>> object_points(calib_corners_all_.size());
+    for (size_t i = 0; i < calib_corners_all_.size(); ++i) {
+        for (int r = 0; r < board_size.height; ++r) {
+            for (int c = 0; c < board_size.width; ++c) {
+                object_points[i].emplace_back(c * square_size_mm, r * square_size_mm, 0.0f);
+            }
+        }
+    }
+
+    cv::Mat camera_matrix = cv::Mat::eye(3, 3, CV_64F);
+    cv::Mat dist_coeffs = cv::Mat::zeros(8, 1, CV_64F);
+    std::vector<cv::Mat> rvecs, tvecs;
+
+    double rms = cv::calibrateCamera(object_points, calib_corners_all_, calib_image_size_,
+                                     camera_matrix, dist_coeffs, rvecs, tvecs);
+
+    current_calibration_ = {
+        {"status", "ok"},
+        {"rms_reprojection_error", rms},
+        {"frame_count", calib_corners_all_.size()},
+        {"image_size", {{"width", calib_image_size_.width}, {"height", calib_image_size_.height}}},
+        {"camera_matrix", {
+            {"fx", camera_matrix.at<double>(0, 0)},
+            {"fy", camera_matrix.at<double>(1, 1)},
+            {"cx", camera_matrix.at<double>(0, 2)},
+            {"cy", camera_matrix.at<double>(1, 2)}
+        }},
+        {"distortion", {
+            {"k1", dist_coeffs.at<double>(0)},
+            {"k2", dist_coeffs.at<double>(1)},
+            {"p1", dist_coeffs.at<double>(2)},
+            {"p2", dist_coeffs.at<double>(3)},
+            {"k3", dist_coeffs.at<double>(4)}
+        }}
+    };
+    return current_calibration_;
+}
+
+nlohmann::json DisplayPipeline::get_calibration() const {
+    std::lock_guard<std::mutex> lock(calib_mu_);
+    if (current_calibration_.empty()) {
+        return {{"status", "uncalibrated"}, {"frame_count", calib_corners_all_.size()}};
+    }
+    return current_calibration_;
 }

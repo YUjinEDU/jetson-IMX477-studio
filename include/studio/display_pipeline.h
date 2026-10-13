@@ -11,6 +11,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <nlohmann/json.hpp>
+#include <opencv2/opencv.hpp>
 
 class CameraService;
 
@@ -58,6 +60,19 @@ public:
     void increment_viewers();
     void decrement_viewers();
     std::string capture_snapshot(const std::string& directory = "snapshots");
+    // Video Recording
+    bool start_recording(const std::string& directory = "recordings");
+    bool stop_recording();
+    bool is_recording() const;
+    std::string get_recording_path() const;
+    uint64_t get_recorded_frames() const;
+
+    // Calibration
+    bool capture_calibration_frame();
+    nlohmann::json compute_calibration();
+    nlohmann::json get_calibration() const;
+    void clear_calibration_frames();
+    int get_calibration_frame_count() const;
 
 
 private:
@@ -84,6 +99,23 @@ private:
     mutable std::mutex metrics_mu_;
     DisplayMetrics metrics_;
     std::atomic<uint32_t> viewers_count_{0};
+    // Video Recording
+    mutable std::mutex record_mu_;
+    std::atomic<bool> is_recording_{false};
+    cv::VideoWriter record_writer_;
+    std::string record_path_;
+    std::atomic<uint64_t> recorded_frames_{0};
+    uint64_t record_start_time_ns_{0};
+
+    // Calibration
+    mutable std::mutex calib_mu_;
+    std::vector<std::vector<cv::Point2f>> calib_corners_all_;
+    cv::Size calib_image_size_{0, 0};
+    nlohmann::json current_calibration_;
+    bool calib_request_capture_{false};
+    bool calib_capture_done_{false};
+    bool calib_corners_found_last_{false};
+    std::condition_variable calib_cv_;
 
     void run();
 };

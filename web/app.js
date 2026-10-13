@@ -20,9 +20,7 @@
 
   // KPI Elements
   const metricSensorFps = document.getElementById('metric-sensor-fps');
-  const metricHostFps = document.getElementById('metric-host-fps');
   const metricGaps = document.getElementById('metric-gaps');
-  const metricBadIv = document.getElementById('metric-bad-iv');
   const metricTotalFrames = document.getElementById('metric-total-frames');
   const metricUptime = document.getElementById('metric-uptime');
 
@@ -44,7 +42,6 @@
   const selectEdge = document.getElementById('select-edge');
 
   // AE Elements
-  const aeRadios = document.querySelectorAll('input[name="ae-mode"]');
   const manualExpGroup = document.getElementById('manual-exp-group');
   const manualGainGroup = document.getElementById('manual-gain-group');
   const aeOptions = document.getElementById('ae-options');
@@ -59,9 +56,9 @@
   const focusMeterFill = document.getElementById('focus-meter-fill');
   const focusMeterPeak = document.getElementById('focus-meter-peak');
   const histCanvas = document.getElementById('histogram-canvas');
-  const histCtx = histCanvas.getContext('2d');
+  const histCtx = histCanvas ? histCanvas.getContext('2d') : null;
   const sparklineCanvas = document.getElementById('fps-sparkline-canvas');
-  const sparklineCtx = sparklineCanvas.getContext('2d');
+  const sparklineCtx = sparklineCanvas ? sparklineCanvas.getContext('2d') : null;
   const sparklineVal = document.getElementById('sparkline-val');
 
   // Blur Calc
@@ -83,13 +80,34 @@
   const selectViewFps = document.getElementById('select-view-fps');
   const btnFullscreen = document.getElementById('btn-fullscreen');
 
-  // Presets & Gallery
+  // Presets & Media
   const presetSelect = document.getElementById('preset-select');
   const btnLoadPreset = document.getElementById('btn-load-preset');
   const btnSavePreset = document.getElementById('btn-save-preset');
   const btnSnapshot = document.getElementById('btn-snapshot');
   const galleryContainer = document.getElementById('gallery-container');
   const btnRefreshGallery = document.getElementById('btn-refresh-gallery');
+
+  // Video Recording Elements
+  const btnRecord = document.getElementById('btn-record');
+  const recLabel = document.getElementById('rec-label');
+  const recTimer = document.getElementById('rec-timer');
+  const osdRecBadge = document.getElementById('osd-rec-badge');
+  let isRecording = false;
+  let recordTimerInterval = null;
+  let recordSeconds = 0;
+
+  // Calibration Elements
+  const btnCalibCapture = document.getElementById('btn-calib-capture');
+  const btnCalibCompute = document.getElementById('btn-calib-compute');
+  const btnCalibClear = document.getElementById('btn-calib-clear');
+  const calibFrameCount = document.getElementById('calib-frame-count');
+  const calibStatusText = document.getElementById('calib-status-text');
+  const calibRmsText = document.getElementById('calib-rms-text');
+  const calibMatrixGrid = document.getElementById('calib-matrix-grid');
+
+  // Sensor Mode Buttons
+  const sensorModeBtns = document.querySelectorAll('.seg-btn[data-sensor-mode]');
 
   // Modal
   const shortcutsModal = document.getElementById('shortcuts-modal');
@@ -98,19 +116,20 @@
 
   // State
   let currentExposureUs = 4000;
-  let isDraggingSlider = false;
   let postControlsTimer = null;
   let postDisplayTimer = null;
   let peakFocus = 10.0;
   let activeZoom = 'fit';
   let activeCenterX = 0.5;
   let activeCenterY = 0.5;
-  const fpsHistory = []; // rolling 60 samples
+  let isSnapping = false;
+  const fpsHistory = [];
 
   function showToast(msg) {
+    if (!toast) return;
     toast.textContent = msg;
     toast.classList.add('show');
-    setTimeout(() => toast.classList.remove('show'), 3500);
+    setTimeout(() => toast.classList.remove('show'), 3200);
   }
 
   // --- API Handlers ---
@@ -137,54 +156,193 @@
   }
 
   // --- Tabs Navigation ---
-  document.querySelectorAll('.tab-btn').forEach(btn => {
+  document.querySelectorAll('.itab-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('.itab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.itab-pane').forEach(p => p.classList.remove('active'));
       btn.classList.add('active');
       const target = document.getElementById(btn.dataset.tab);
       if (target) target.classList.add('active');
-
-      if (btn.dataset.tab === 'tab-gallery') {
-        loadSnapshotGallery();
+      if (btn.dataset.tab === 'tab-media') {
+        loadMediaGallery();
+      } else if (btn.dataset.tab === 'tab-calib') {
+        refreshCalibrationState();
       }
       history.replaceState(null, '', '#' + btn.dataset.tab);
     });
   });
 
+  // --- Sensor Mode Switching (4K 30P / 1080 60P / 990 120P) ---
+  sensorModeBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const mode = parseInt(btn.dataset.sensorMode, 10);
+      showToast(`Switching to sensor mode ${mode}...`);
+      fetch('/api/sensor_mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: mode })
+      })
+      .then(r => r.json())
+      .then(d => {
+        if (d.status === 'ok') {
+          sensorModeBtns.forEach(b => b.classList.toggle('active', parseInt(b.dataset.sensorMode, 10) === mode));
+          hudRes.textContent = `${d.width}×${d.height}`;
+          hudSensor.textContent = `${d.target_fps.toFixed(0)} FPS`;
+          showToast(`Active: ${d.width}×${d.height} @ ${d.target_fps} FPS`);
+          // Re-fetch state for new exposure limits
+          fetch('/api/state').then(r => r.json()).then(applyStateToUI);
+        } else {
+          showToast(`Mode switch error: ${d.error || 'Failed'}`);
+        }
+      })
+      .catch(e => showToast(`Switch failed: ${e}`));
+    });
+  });
+
+  // --- Video Recording Toggle ---
+  function updateRecordTimerDisplay() {
+    const mins = String(Math.floor(recordSeconds / 60)).padStart(2, '0');
+    const secs = String(recordSeconds % 60).padStart(2, '0');
+    if (recTimer) recTimer.textContent = `${mins}:${secs}`;
+  }
+
+  function toggleRecording() {
+    if (!isRecording) {
+      fetch('/api/record/start', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+          if (d.status === 'ok') {
+            isRecording = true;
+            btnRecord.classList.add('is-recording');
+            recLabel.textContent = 'STOP';
+            recTimer.style.display = 'inline';
+            if (osdRecBadge) osdRecBadge.style.display = 'block';
+            recordSeconds = 0;
+            updateRecordTimerDisplay();
+            recordTimerInterval = setInterval(() => {
+              recordSeconds++;
+              updateRecordTimerDisplay();
+            }, 1000);
+            showToast(`● Recording started: ${d.path}`);
+          } else {
+            showToast(`Record start failed: ${d.error || 'Error'}`);
+          }
+        })
+        .catch(e => showToast(`Record error: ${e}`));
+    } else {
+      fetch('/api/record/stop', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+          isRecording = false;
+          btnRecord.classList.remove('is-recording');
+          recLabel.textContent = 'REC';
+          recTimer.style.display = 'none';
+          if (osdRecBadge) osdRecBadge.style.display = 'none';
+          clearInterval(recordTimerInterval);
+          showToast(`■ Video saved: ${d.path} (${d.frames} frames)`);
+          loadMediaGallery();
+        })
+        .catch(e => showToast(`Record error: ${e}`));
+    }
+  }
+  if (btnRecord) btnRecord.addEventListener('click', toggleRecording);
+
+  // --- Camera Calibration Handlers ---
+  function refreshCalibrationState() {
+    fetch('/api/calibration')
+      .then(r => r.json())
+      .then(d => {
+        if (calibFrameCount) calibFrameCount.textContent = d.frame_count || 0;
+        if (d.status === 'ok') {
+          if (calibStatusText) calibStatusText.textContent = 'Calibrated';
+          if (calibRmsText) calibRmsText.textContent = `${d.rms_reprojection_error.toFixed(3)} px`;
+          if (calibMatrixGrid && d.camera_matrix) {
+            calibMatrixGrid.innerHTML = `
+              <span>fx: ${d.camera_matrix.fx.toFixed(1)}</span>
+              <span>cx: ${d.camera_matrix.cx.toFixed(1)}</span>
+              <span>fy: ${d.camera_matrix.fy.toFixed(1)}</span>
+              <span>cy: ${d.camera_matrix.cy.toFixed(1)}</span>
+              <span>k1: ${d.distortion.k1.toFixed(3)}</span>
+              <span>k2: ${d.distortion.k2.toFixed(3)}</span>
+            `;
+          }
+        } else {
+          if (calibStatusText) calibStatusText.textContent = 'Uncalibrated';
+          if (calibRmsText) calibRmsText.textContent = '-- px';
+        }
+      })
+      .catch(console.error);
+  }
+
+  if (btnCalibCapture) {
+    btnCalibCapture.addEventListener('click', () => {
+      fetch('/api/calibration/capture', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+          if (calibFrameCount) calibFrameCount.textContent = d.frame_count;
+          showToast(d.chessboard_found ? `✓ Chessboard detected (Frame ${d.frame_count})` : '✗ No 9×6 chessboard found');
+        });
+    });
+  }
+  if (btnCalibCompute) {
+    btnCalibCompute.addEventListener('click', () => {
+      showToast('Computing camera matrix...');
+      fetch('/api/calibration/compute', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+          if (d.status === 'ok') {
+            showToast(`Calibration success! RMS: ${d.rms_reprojection_error.toFixed(3)} px`);
+            refreshCalibrationState();
+          } else {
+            showToast(`Calibration error: ${d.error || 'Need ≥3 frames'}`);
+          }
+        });
+    });
+  }
+  if (btnCalibClear) {
+    btnCalibClear.addEventListener('click', () => {
+      fetch('/api/calibration/clear', { method: 'POST' })
+        .then(() => {
+          if (calibFrameCount) calibFrameCount.textContent = '0';
+          showToast('Calibration frames reset');
+        });
+    });
+  }
+
   // --- Motion Blur Calculator ---
   function updateBlurCalculator() {
+    if (!inputBallSpeed || !inputFovWidth) return;
     const kmh = parseFloat(inputBallSpeed.value) || 145;
     const fovM = parseFloat(inputFovWidth.value) || 3.0;
     const speedMs = kmh / 3.6;
-    calcSpeedMs.textContent = speedMs.toFixed(1) + ' m/s';
+    if (calcSpeedMs) calcSpeedMs.textContent = speedMs.toFixed(1) + ' m/s';
 
     const expSec = currentExposureUs / 1e6;
     const blurMeters = speedMs * expSec;
     const blurCm = blurMeters * 100;
     const blurPx = (blurMeters / fovM) * 1332;
 
-    calcBlurCm.textContent = blurCm.toFixed(1) + ' cm';
-    calcBlurCmBadge.textContent = blurCm.toFixed(1) + ' cm';
-    calcBlurPx.textContent = Math.round(blurPx) + ' px';
+    if (calcBlurCm) calcBlurCm.textContent = blurCm.toFixed(1) + ' cm';
+    if (calcBlurCmBadge) calcBlurCmBadge.textContent = blurCm.toFixed(1) + ' cm';
+    if (calcBlurPx) calcBlurPx.textContent = Math.round(blurPx) + ' px';
 
-    // Scale visual streak line on screen
-    const maxTrackWidthPx = 180;
-    const scaledWidth = Math.min(maxTrackWidthPx, Math.max(10, (blurCm / 20.0) * maxTrackWidthPx));
-    blurStreakLine.style.width = scaledWidth + 'px';
+    if (calcBlurRec) {
+      if (blurCm <= 4.0) {
+        calcBlurRec.textContent = 'Low blur (<4cm) ✓';
+      } else {
+        calcBlurRec.textContent = `High blur! Target ≤ ${(4.0 / (speedMs * 100) * 1000).toFixed(1)}ms`;
+      }
+    }
 
-    // Shutter recommendation
-    if (blurCm <= 4.0) {
-      calcBlurRec.textContent = 'Excellent (<= 4cm streak)';
-      calcBlurRec.style.color = 'var(--success)';
-    } else if (blurCm <= 8.0) {
-      calcBlurRec.textContent = 'Moderate streak (<= 8cm)';
-      calcBlurRec.style.color = 'var(--warning)';
-    } else {
-      calcBlurRec.textContent = 'High blur! Recommend <= 1.0ms';
-      calcBlurRec.style.color = 'var(--error)';
+    if (blurStreakLine) {
+      const maxStreakPct = 85;
+      const pct = Math.min(maxStreakPct, Math.max(5, (blurCm / 30.0) * maxStreakPct));
+      blurStreakLine.style.width = pct.toFixed(1) + '%';
     }
   }
+
+  if (inputBallSpeed) inputBallSpeed.addEventListener('input', updateBlurCalculator);
+  if (inputFovWidth) inputFovWidth.addEventListener('input', updateBlurCalculator);
 
   document.querySelectorAll('.btn-chip[data-speed]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -195,8 +353,27 @@
     });
   });
 
-  // --- FPS Sparkline Drawing ---
+  const btnApplyRecShutter = document.getElementById('btn-apply-rec-shutter');
+  if (btnApplyRecShutter) {
+    btnApplyRecShutter.addEventListener('click', () => {
+      const speedKmh = parseFloat(inputBallSpeed.value) || 145;
+      const targetExp = speedKmh >= 150 ? 500 : 1000;
+      const targetGain = targetExp === 500 ? 8.0 : 4.0;
+      postControls({ auto_exposure: false, exposure_us: targetExp, gain: targetGain });
+      rangeExp.value = targetExp;
+      valExpUs.textContent = targetExp;
+      valExpMs.textContent = `${(targetExp / 1000).toFixed(2)} ms`;
+      rangeGain.value = targetGain;
+      valGain.textContent = `${targetGain.toFixed(2)}`;
+      currentExposureUs = targetExp;
+      updateBlurCalculator();
+      showToast(`Applied ${targetExp / 1000}ms shutter @ ${targetGain}× gain`);
+    });
+  }
+
+  // --- Telemetry Drawing (Sparkline & Histogram) ---
   function drawSparkline(val) {
+    if (!sparklineCtx) return;
     if (val > 0) {
       fpsHistory.push(val);
       if (fpsHistory.length > 60) fpsHistory.shift();
@@ -205,21 +382,21 @@
 
     const w = sparklineCanvas.width;
     const h = sparklineCanvas.height;
-    sparklineCtx.fillStyle = '#f8fafc';
+    sparklineCtx.fillStyle = '#edf1f5';
     sparklineCtx.fillRect(0, 0, w, h);
 
-    // Target 120 FPS dashed horizontal guideline
+    // Target FPS horizontal guideline
     const targetY = h - (120.0 / 140.0) * h;
-    sparklineCtx.strokeStyle = 'rgba(5, 150, 105, 0.5)';
+    sparklineCtx.strokeStyle = 'rgba(16, 185, 129, 0.5)';
     sparklineCtx.lineWidth = 1;
-    sparklineCtx.setLineDash([4, 4]);
+    sparklineCtx.setLineDash([3, 3]);
     sparklineCtx.beginPath();
     sparklineCtx.moveTo(0, targetY);
     sparklineCtx.lineTo(w, targetY);
     sparklineCtx.stroke();
     sparklineCtx.setLineDash([]);
 
-    // FPS path
+    // Line
     sparklineCtx.beginPath();
     const step = w / 60;
     const offset = 60 - fpsHistory.length;
@@ -229,20 +406,18 @@
       if (i === 0) sparklineCtx.moveTo(x, y);
       else sparklineCtx.lineTo(x, y);
     }
-
-    sparklineCtx.strokeStyle = '#2563eb';
-    sparklineCtx.lineWidth = 2;
+    sparklineCtx.strokeStyle = '#0284c7';
+    sparklineCtx.lineWidth = 1.5;
     sparklineCtx.stroke();
 
-    sparklineVal.textContent = (val > 0 ? val.toFixed(1) : '--') + ' fps';
+    if (sparklineVal) sparklineVal.textContent = (val > 0 ? val.toFixed(1) : '--') + ' fps';
   }
 
-  // --- Histogram Drawing ---
   function drawHistogram(bins) {
-    if (!bins || bins.length !== 64) return;
+    if (!histCtx || !bins || bins.length !== 64) return;
     const w = histCanvas.width;
     const h = histCanvas.height;
-    histCtx.fillStyle = '#f8fafc';
+    histCtx.fillStyle = '#edf1f5';
     histCtx.fillRect(0, 0, w, h);
 
     const maxVal = Math.max(...bins, 1);
@@ -252,24 +427,26 @@
       const barH = (bins[i] / maxVal) * (h - 2);
       const x = i * barW;
       const y = h - barH;
-      histCtx.fillStyle = '#3b82f6';
+      histCtx.fillStyle = '#0284c7';
       histCtx.fillRect(x, y, barW - 0.5, barH);
     }
   }
 
   // --- Minimap Navigator Update ---
   function updateMinimap() {
+    if (!minimapBox || !minimapCropRect) return;
     if (activeZoom === 'fit') {
       minimapBox.style.display = 'none';
-      hudZoom.textContent = 'ZOOM: FIT';
+      if (hudZoom) hudZoom.textContent = 'FIT';
       return;
     }
 
     minimapBox.style.display = 'block';
-    hudZoom.textContent = `ZOOM: ${activeZoom.toUpperCase()} (${Math.round(activeCenterX*100)}%, ${Math.round(activeCenterY*100)}%)`;
+    if (hudZoom) hudZoom.textContent = `${activeZoom.toUpperCase()} (${Math.round(activeCenterX*100)}%, ${Math.round(activeCenterY*100)}%)`;
 
-    const cropW = (activeZoom === '1x') ? (960 / 1332) : (activeZoom === '4x') ? (240 / 1332) : (480 / 1332);
-    const cropH = (activeZoom === '1x') ? (714 / 990) : (activeZoom === '4x') ? (178 / 990) : (356 / 990);
+    const cropFactor = (activeZoom === '1x') ? 0.72 : (activeZoom === '4x') ? 0.18 : 0.36;
+    const cropW = cropFactor;
+    const cropH = cropFactor;
 
     const left = Math.max(0, Math.min(1 - cropW, activeCenterX - cropW / 2));
     const top = Math.max(0, Math.min(1 - cropH, activeCenterY - cropH / 2));
@@ -285,137 +462,129 @@
     if (!state) return;
     const ctrl = state.controls;
     const ds = state.display_settings || state.display;
+    const caps = state.capabilities;
+
+    if (caps) {
+      if (caps.width && caps.height && hudRes) hudRes.textContent = `${caps.width}×${caps.height}`;
+      if (caps.target_fps && hudSensor) hudSensor.textContent = `${caps.target_fps.toFixed(0)} FPS`;
+      if (caps.active_sensor_mode !== undefined) {
+        sensorModeBtns.forEach(b => b.classList.toggle('active', parseInt(b.dataset.sensorMode, 10) === caps.active_sensor_mode));
+      }
+      if (caps.max_exposure_us && rangeExp) {
+        rangeExp.max = caps.max_exposure_us;
+      }
+    }
 
     if (ctrl) {
       if (ctrl.auto_exposure !== undefined) {
         const radio = document.querySelector(`input[name="ae-mode"][value="${ctrl.auto_exposure ? 'auto' : 'manual'}"]`);
-        if (radio) radio.checked = true;
-        manualExpGroup.style.opacity = ctrl.auto_exposure ? '0.4' : '1.0';
-        manualGainGroup.style.opacity = ctrl.auto_exposure ? '0.4' : '1.0';
-        aeOptions.style.display = ctrl.auto_exposure ? 'block' : 'none';
+        if (radio) {
+          radio.checked = true;
+          document.querySelectorAll('.seg-group input[name="ae-mode"]').forEach(inp => {
+            inp.closest('.seg-btn').classList.toggle('active', inp.checked);
+          });
+        }
+        if (manualExpGroup) manualExpGroup.style.opacity = ctrl.auto_exposure ? '0.4' : '1.0';
+        if (manualGainGroup) manualGainGroup.style.opacity = ctrl.auto_exposure ? '0.4' : '1.0';
+        if (aeOptions) aeOptions.style.display = ctrl.auto_exposure ? 'block' : 'none';
       }
-      if (ctrl.exposure_us !== undefined) {
+      if (ctrl.exposure_us !== undefined && rangeExp) {
         rangeExp.value = ctrl.exposure_us;
-        valExpUs.textContent = ctrl.exposure_us + ' \u03bcs';
-        valExpMs.textContent = '(' + (ctrl.exposure_us / 1000).toFixed(2) + ' ms)';
+        if (valExpUs) valExpUs.textContent = ctrl.exposure_us;
+        if (valExpMs) valExpMs.textContent = (ctrl.exposure_us / 1000).toFixed(2) + ' ms';
         currentExposureUs = ctrl.exposure_us;
         updateBlurCalculator();
         document.querySelectorAll('.btn-chip[data-exp]').forEach(b => {
           b.classList.toggle('active', parseInt(b.dataset.exp, 10) === ctrl.exposure_us);
         });
       }
-      if (ctrl.gain !== undefined) {
+      if (ctrl.gain !== undefined && rangeGain) {
         rangeGain.value = ctrl.gain;
-        valGain.textContent = ctrl.gain.toFixed(2) + '\u00d7';
+        if (valGain) valGain.textContent = ctrl.gain.toFixed(2);
         document.querySelectorAll('.btn-chip[data-gain]').forEach(b => {
           b.classList.toggle('active', Math.abs(parseFloat(b.dataset.gain) - ctrl.gain) < 0.1);
         });
       }
-      if (ctrl.ae_max_exposure_us !== undefined) {
+      if (ctrl.ae_max_exposure_us !== undefined && rangeAeMaxExp) {
         rangeAeMaxExp.value = ctrl.ae_max_exposure_us;
-        valAeMaxExp.textContent = ctrl.ae_max_exposure_us + ' \u03bcs';
+        if (valAeMaxExp) valAeMaxExp.textContent = ctrl.ae_max_exposure_us + ' \u03bcs';
       }
-      if (ctrl.ae_max_gain !== undefined) {
+      if (ctrl.ae_max_gain !== undefined && rangeAeMaxGain) {
         rangeAeMaxGain.value = ctrl.ae_max_gain;
-        valAeMaxGain.textContent = parseFloat(ctrl.ae_max_gain).toFixed(1) + '\u00d7';
+        if (valAeMaxGain) valAeMaxGain.textContent = ctrl.ae_max_gain.toFixed(1) + '\u00d7';
       }
-      if (ctrl.ae_lock !== undefined) chkAeLock.checked = ctrl.ae_lock;
-      if (ctrl.ev_compensation !== undefined) {
+      if (ctrl.ae_lock !== undefined && chkAeLock) chkAeLock.checked = ctrl.ae_lock;
+      if (ctrl.ev_compensation !== undefined && rangeEv) {
         rangeEv.value = ctrl.ev_compensation;
-        valEv.textContent = (ctrl.ev_compensation > 0 ? '+' : '') + parseFloat(ctrl.ev_compensation).toFixed(1) + ' EV';
+        if (valEv) valEv.textContent = (ctrl.ev_compensation >= 0 ? '+' : '') + ctrl.ev_compensation.toFixed(2) + ' EV';
       }
-      if (ctrl.antibanding !== undefined) selectAntibanding.value = ctrl.antibanding;
-      if (ctrl.awb_mode !== undefined) selectAwb.value = ctrl.awb_mode;
-      if (ctrl.awb_lock !== undefined) chkAwbLock.checked = ctrl.awb_lock;
-      if (ctrl.isp_digital_gain !== undefined) {
+      if (ctrl.antibanding && selectAntibanding) selectAntibanding.value = ctrl.antibanding;
+      if (ctrl.awb_mode && selectAwb) selectAwb.value = ctrl.awb_mode;
+      if (ctrl.awb_lock !== undefined && chkAwbLock) chkAwbLock.checked = ctrl.awb_lock;
+      if (ctrl.isp_digital_gain !== undefined && rangeIspGain) {
         rangeIspGain.value = ctrl.isp_digital_gain;
-        valIspGain.textContent = parseFloat(ctrl.isp_digital_gain).toFixed(1) + '\u00d7';
+        if (valIspGain) valIspGain.textContent = ctrl.isp_digital_gain.toFixed(1) + '\u00d7';
       }
-      if (ctrl.denoise_mode !== undefined) selectDenoise.value = ctrl.denoise_mode;
-      if (ctrl.edge_mode !== undefined) selectEdge.value = ctrl.edge_mode;
+      if (ctrl.denoise_mode && selectDenoise) selectDenoise.value = ctrl.denoise_mode;
+      if (ctrl.edge_mode && selectEdge) selectEdge.value = ctrl.edge_mode;
     }
 
     if (ds) {
-      if (ds.zoom_mode !== undefined) {
+      if (ds.zoom_mode) {
         activeZoom = ds.zoom_mode;
-        zoomBtns.forEach(b => b.classList.toggle('active', b.dataset.zoom === ds.zoom_mode));
+        zoomBtns.forEach(b => b.classList.toggle('active', b.dataset.zoom === activeZoom));
+        updateMinimap();
       }
-      if (ds.center_x !== undefined) activeCenterX = ds.center_x;
-      if (ds.center_y !== undefined) activeCenterY = ds.center_y;
-      updateMinimap();
-
-      if (ds.focus_peaking !== undefined) chkPeaking.checked = ds.focus_peaking;
-      if (ds.peaking_color !== undefined) selectPeakingColor.value = ds.peaking_color;
-      if (ds.zebra_stripes !== undefined) chkZebra.checked = ds.zebra_stripes;
-      if (ds.grid_mode !== undefined) selectGrid.value = ds.grid_mode;
-      if (ds.fps_limit !== undefined) selectViewFps.value = ds.fps_limit;
+      if (ds.focus_peaking !== undefined && chkPeaking) chkPeaking.checked = ds.focus_peaking;
+      if (ds.peaking_color && selectPeakingColor) selectPeakingColor.value = ds.peaking_color;
+      if (ds.zebra_stripes !== undefined && chkZebra) chkZebra.checked = ds.zebra_stripes;
+      if (ds.grid_mode && selectGrid) selectGrid.value = ds.grid_mode;
+      if (ds.fps_limit && selectViewFps) selectViewFps.value = String(ds.fps_limit);
     }
   }
 
-  // --- SSE Event Stream ---
+  // --- Real-time SSE Stream Consumer ---
   function setupSSE() {
     const es = new EventSource('/events');
-
     es.onopen = () => {
-      connPill.className = 'status-indicator connected';
-      connPill.title = 'Connected to 120fps ISP service';
+      if (connPill) connPill.classList.add('connected');
     };
-
     es.onerror = () => {
-      connPill.className = 'status-indicator error';
-      connPill.title = 'Reconnecting...';
+      if (connPill) connPill.classList.remove('connected');
     };
-
-    es.onmessage = (e) => {
+    es.onmessage = (event) => {
       try {
-        const data = JSON.parse(e.data);
-        const cm = data.camera_metrics;
-        const dm = data.display_metrics;
-        const ctrl = data.controls;
+        const d = JSON.parse(event.data);
+        const cm = d.camera_metrics;
+        const dm = d.display_metrics;
 
-        metricSensorFps.textContent = cm.sensor_fps > 0 ? cm.sensor_fps.toFixed(1) : '--';
-        metricHostFps.textContent = cm.host_fps > 0 ? cm.host_fps.toFixed(1) : '--';
-        hudFps.textContent = (dm.display_fps > 0 ? dm.display_fps.toFixed(0) : '--') + ' FPS VIEW';
-        hudSensor.textContent = (cm.sensor_fps > 0 ? cm.sensor_fps.toFixed(1) : '120.0') + ' FPS SENSOR';
-
-        metricGaps.textContent = cm.sequence_gaps;
-        metricGaps.className = 'kpi-val ' + (cm.sequence_gaps === 0 ? 'success' : 'warning');
-
-        metricBadIv.textContent = `${cm.bad_intervals} anomalies (${cm.min_interval_ms.toFixed(1)}..${cm.max_interval_ms.toFixed(1)}ms)`;
-
-        metricTotalFrames.textContent = cm.total_frames.toLocaleString();
-        const uptimeSec = Math.floor((cm.uptime_ms || 0) / 1000);
-        const m = Math.floor(uptimeSec / 60);
-        const s = uptimeSec % 60;
-        metricUptime.textContent = `${m}m ${s}s up`;
-
-        valActualCct.textContent = (cm.actual_cct || '--') + ' K';
-
-        currentExposureUs = ctrl.auto_exposure ? cm.actual_exposure_us : ctrl.exposure_us;
-        updateBlurCalculator();
-
-        if (dm.focus_score !== undefined) {
-          focusScoreVal.textContent = Math.round(dm.focus_score);
-          peakFocus = Math.max(peakFocus, dm.focus_score);
-          const pct = Math.min(100, Math.max(0, (dm.focus_score / peakFocus) * 100));
-          focusMeterFill.style.width = pct.toFixed(1) + '%';
-          focusMeterPeak.style.left = pct.toFixed(1) + '%';
+        if (cm) {
+          if (metricSensorFps) metricSensorFps.textContent = cm.sensor_fps > 0 ? cm.sensor_fps.toFixed(1) : '--';
+          if (metricGaps) metricGaps.textContent = cm.sequence_gaps || 0;
+          if (metricTotalFrames) metricTotalFrames.textContent = (cm.total_frames || 0).toLocaleString();
+          if (metricUptime && cm.uptime_ms) {
+            const sec = Math.floor(cm.uptime_ms / 1000);
+            const m = Math.floor(sec / 60);
+            const s = sec % 60;
+            metricUptime.textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+          }
+          if (valActualCct && cm.actual_cct) valActualCct.textContent = cm.actual_cct + ' K';
+          drawSparkline(cm.sensor_fps || 0);
         }
 
-        if (dm.histogram_64) {
-          drawHistogram(dm.histogram_64);
-        }
-
-        if (cm.sensor_fps > 0) {
-          drawSparkline(cm.sensor_fps);
-        }
-
-        if (!isDraggingSlider && !ctrl.auto_exposure) {
-          rangeExp.value = ctrl.exposure_us;
-          valExpUs.textContent = ctrl.exposure_us + ' \u03bcs';
-          valExpMs.textContent = '(' + (ctrl.exposure_us / 1000).toFixed(2) + ' ms)';
-          rangeGain.value = ctrl.gain;
-          valGain.textContent = ctrl.gain.toFixed(2) + '\u00d7';
+        if (dm) {
+          if (hudFps) hudFps.textContent = (dm.display_fps || 0).toFixed(0) + ' FPS VIEW';
+          if (dm.focus_score !== undefined) {
+            const score = Math.round(dm.focus_score);
+            if (focusScoreVal) focusScoreVal.textContent = score;
+            peakFocus = Math.max(peakFocus, score, 50);
+            const pct = Math.min(100, Math.max(0, (score / peakFocus) * 100));
+            if (focusMeterFill) focusMeterFill.style.width = pct + '%';
+            if (focusMeterPeak) focusMeterPeak.style.left = pct + '%';
+          }
+          if (dm.histogram_64) {
+            drawHistogram(dm.histogram_64);
+          }
         }
       } catch (err) {
         console.error('SSE parse error:', err);
@@ -424,23 +593,26 @@
   }
 
   // --- Snapshot Trigger ---
-  let isSnapping = false;
   function triggerSnapshot() {
     if (isSnapping) return;
     isSnapping = true;
-    btnSnapshot.disabled = true;
-    btnSnapshot.textContent = '\u23F3 \uCD2C\uC601 \uC911...';
-    // Flash animation
-    shutterFlash.classList.remove('flash');
-    void shutterFlash.offsetWidth; // re-flow
-    shutterFlash.classList.add('flash');
+    if (btnSnapshot) {
+      btnSnapshot.disabled = true;
+      btnSnapshot.textContent = '...';
+    }
+    if (shutterFlash) {
+      shutterFlash.classList.remove('active');
+      void shutterFlash.offsetWidth;
+      shutterFlash.classList.add('active');
+      setTimeout(() => shutterFlash.classList.remove('active'), 200);
+    }
 
     fetch('/api/snapshot', { method: 'POST' })
       .then(r => r.json())
       .then(d => {
         if (d.status === 'ok') {
-          showToast(`\uD83D\uDCF7 \uC2A4\uB0C5\uC0F7 \uC800\uC7A5 \uC644\uB8CC: ${d.path}`);
-          loadSnapshotGallery();
+          showToast(`Snapshot saved: ${d.path}`);
+          loadMediaGallery();
         } else {
           showToast(`Snapshot failed: ${d.error || 'Unknown error'}`);
         }
@@ -448,270 +620,108 @@
       .catch(e => showToast('Error: ' + e))
       .finally(() => {
         isSnapping = false;
-        btnSnapshot.disabled = false;
-        btnSnapshot.textContent = '\uD83D\uDCF7 \uC2A4\uB0C5\uC0F7 (Space)';
+        if (btnSnapshot) {
+          btnSnapshot.disabled = false;
+          btnSnapshot.textContent = 'SNAP';
+        }
       });
   }
+  if (btnSnapshot) btnSnapshot.addEventListener('click', triggerSnapshot);
 
-  btnSnapshot.addEventListener('click', triggerSnapshot);
+  // --- Combined Media Gallery (Snapshots & Video Recordings) ---
+  function loadMediaGallery() {
+    if (!galleryContainer) return;
+    Promise.all([
+      fetch('/api/snapshots').then(r => r.json()).catch(() => []),
+      fetch('/api/recordings').then(r => r.json()).catch(() => [])
+    ]).then(([snaps, recs]) => {
+      const items = [];
+      (snaps || []).forEach(s => items.push({ ...s, type: 'photo' }));
+      (recs || []).forEach(r => items.push({ ...r, type: 'video' }));
+
+      if (items.length === 0) {
+        galleryContainer.innerHTML = '<p class="gallery-empty">No media captured yet.</p>';
+        return;
+      }
+
+      galleryContainer.innerHTML = '';
+      items.reverse().slice(0, 16).forEach(item => {
+        const card = document.createElement('div');
+        card.className = 'gallery-card';
+        const isVid = item.type === 'video';
+        card.innerHTML = `
+          <a href="${item.url}" target="_blank">
+            ${isVid ? `<div style="height:90px;background:#0f172a;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;">▶ VIDEO</div>` : `<img src="${item.url}" alt="${item.filename}" loading="lazy">`}
+          </a>
+          <div class="gallery-meta">
+            <span>${item.filename.length > 20 ? item.filename.substring(0, 18) + '..' : item.filename}</span>
+            <a href="${item.url}" download style="color:var(--accent);text-decoration:none;font-weight:700;">Save</a>
+          </div>
+        `;
+        galleryContainer.appendChild(card);
+      });
+    }).catch(console.error);
+  }
+  if (btnRefreshGallery) btnRefreshGallery.addEventListener('click', loadMediaGallery);
 
   // --- Fullscreen Toggle ---
-  btnFullscreen.addEventListener('click', () => {
-    viewportCard.classList.toggle('is-fullscreen');
-    const isFs = viewportCard.classList.contains('is-fullscreen');
-    btnFullscreen.innerHTML = isFs ? '&#x2715; Exit FS' : '&#x26F6; Fullscreen';
-  });
-
-  // --- Gallery Loader ---
-  function loadSnapshotGallery() {
-    fetch('/api/snapshots')
-      .then(r => r.json())
-      .then(list => {
-        if (!list || list.length === 0) {
-          galleryContainer.innerHTML = '<p class="gallery-empty">No snapshots captured yet. Press Snap or Space to capture.</p>';
-          return;
-        }
-
-        galleryContainer.innerHTML = '';
-        list.slice(-12).reverse().forEach(item => {
-          const card = document.createElement('div');
-          card.className = 'gallery-card';
-          card.innerHTML = `
-            <a href="${item.url}" target="_blank" title="Open full 1332x990 JPEG">
-              <img src="${item.url}" alt="${item.filename}" loading="lazy">
-            </a>
-            <div class="gallery-meta">
-              <span>${item.filename.replace('snapshot_', '').replace('.jpg', '')}</span>
-              <a href="${item.url}" download class="gallery-link" title="Download">&#x2193; Save</a>
-            </div>
-          `;
-          galleryContainer.appendChild(card);
-        });
-      })
-      .catch(console.error);
+  if (btnFullscreen) {
+    btnFullscreen.addEventListener('click', () => {
+      viewportCard.classList.toggle('is-fullscreen');
+      const isFs = viewportCard.classList.contains('is-fullscreen');
+      btnFullscreen.innerHTML = isFs ? '✕' : '⛶';
+    });
   }
-
-  btnRefreshGallery.addEventListener('click', loadSnapshotGallery);
 
   // --- Keyboard Shortcuts Handler ---
   window.addEventListener('keydown', (e) => {
-    if (e.repeat) return; // Ignore auto-repeat when key is held down
+    if (e.repeat) return;
     if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
     if (e.code === 'Space') {
       e.preventDefault();
       triggerSnapshot();
+    } else if (e.key === 'r' || e.key === 'R') {
+      toggleRecording();
     } else if (e.key === 'f' || e.key === 'F') {
-      btnFullscreen.click();
+      if (btnFullscreen) btnFullscreen.click();
     } else if (e.key === 'p' || e.key === 'P') {
-      chkPeaking.checked = !chkPeaking.checked;
-      postDisplay({ focus_peaking: chkPeaking.checked });
-      showToast(`Peaking: ${chkPeaking.checked ? 'ON' : 'OFF'}`);
+      if (chkPeaking) {
+        chkPeaking.checked = !chkPeaking.checked;
+        postDisplay({ focus_peaking: chkPeaking.checked });
+        showToast(`Peaking: ${chkPeaking.checked ? 'ON' : 'OFF'}`);
+      }
     } else if (e.key === 'z' || e.key === 'Z') {
       const modes = ['fit', '1x', '2x', '4x'];
       const next = modes[(modes.indexOf(activeZoom) + 1) % modes.length];
-      document.querySelector(`.btn-tool[data-zoom="${next}"]`).click();
-    } else if (e.key === 'm' || e.key === 'M') {
-      const curMode = document.querySelector('input[name="ae-mode"]:checked').value;
-      const nextRadio = document.querySelector(`input[name="ae-mode"][value="${curMode === 'manual' ? 'auto' : 'manual'}"]`);
-      nextRadio.checked = true;
-      nextRadio.dispatchEvent(new Event('change'));
+      const targetBtn = document.querySelector(`.btn-tool[data-zoom="${next}"]`);
+      if (targetBtn) targetBtn.click();
     } else if (e.key === '1') {
-      document.querySelector('.btn-chip[data-exp="500"]').click();
+      const b = document.querySelector('.btn-chip[data-exp="500"]'); if (b) b.click();
     } else if (e.key === '2') {
-      document.querySelector('.btn-chip[data-exp="1000"]').click();
+      const b = document.querySelector('.btn-chip[data-exp="1000"]'); if (b) b.click();
     } else if (e.key === '3') {
-      document.querySelector('.btn-chip[data-exp="2000"]').click();
+      const b = document.querySelector('.btn-chip[data-exp="2000"]'); if (b) b.click();
     } else if (e.key === '4') {
-      document.querySelector('.btn-chip[data-exp="4000"]').click();
+      const b = document.querySelector('.btn-chip[data-exp="4000"]'); if (b) b.click();
     } else if (e.key === '?' || (e.key === '/' && e.shiftKey)) {
-      shortcutsModal.style.display = shortcutsModal.style.display === 'none' ? 'flex' : 'none';
+      if (shortcutsModal) shortcutsModal.style.display = shortcutsModal.style.display === 'none' ? 'flex' : 'none';
     } else if (e.key === 'Escape') {
-      shortcutsModal.style.display = 'none';
+      if (shortcutsModal) shortcutsModal.style.display = 'none';
       if (viewportCard.classList.contains('is-fullscreen')) {
         btnFullscreen.click();
       }
     }
   });
 
-  btnShortcuts.addEventListener('click', () => { shortcutsModal.style.display = 'flex'; });
-  btnCloseModal.addEventListener('click', () => { shortcutsModal.style.display = 'none'; });
-  shortcutsModal.addEventListener('click', (e) => {
-    if (e.target === shortcutsModal) shortcutsModal.style.display = 'none';
-  });
-
-  // --- One-Click Scenario Presets (Tab 1) ---
-  document.querySelectorAll('.btn-preset-apply[data-preset-action]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const action = btn.dataset.presetAction;
-      if (action === 'daylight') {
-        postControls({ auto_exposure: false, exposure_us: 2000, gain: 1.5, awb_mode: 'auto', antibanding: 'auto' });
-        rangeExp.value = 2000; valExpUs.textContent = '2000 \u03bcs'; valExpMs.textContent = '(2.00 ms)';
-        rangeGain.value = 1.5; valGain.textContent = '1.50\u00d7';
-        selectAwb.value = 'auto'; selectAntibanding.value = 'auto';
-        showToast('\u2600\uFE0F \uC8FC\uAC04 / \uC57C\uC678 \uACE0\uC18D \uC124\uC815 \uC801\uC6A9 (2ms, 1.5\u00d7)');
-      } else if (action === 'indoor') {
-        postControls({ auto_exposure: false, exposure_us: 4000, gain: 2.5, awb_mode: 'fluorescent', antibanding: '60hz' });
-        rangeExp.value = 4000; valExpUs.textContent = '4000 \u03bcs'; valExpMs.textContent = '(4.00 ms)';
-        rangeGain.value = 2.5; valGain.textContent = '2.50\u00d7';
-        selectAwb.value = 'fluorescent'; selectAntibanding.value = '60hz';
-        showToast('\uD83D\uDCA1 \uC2E4\uB0B4 \uC870\uBA85 60Hz \uC124\uC815 \uC801\uC6A9 (4ms, 2.5\u00d7, \uD615\uAD11\uB4F1)');
-      } else if (action === 'baseball') {
-        postControls({ auto_exposure: false, exposure_us: 1000, gain: 4.0, awb_mode: 'auto' });
-        rangeExp.value = 1000; valExpUs.textContent = '1000 \u03bcs'; valExpMs.textContent = '(1.00 ms)';
-        rangeGain.value = 4.0; valGain.textContent = '4.00\u00d7';
-        postDisplay({ grid_mode: 'crosshair' });
-        selectGrid.value = 'crosshair';
-        showToast('\u26BE \uC57C\uAD6C \uD22C\uAD6C \uCD08\uACE0\uC18D 120fps \uC124\uC815 \uC801\uC6A9 (1ms, 4\u00d7, \uC379\uC790\uC120)');
-      } else if (action === 'lowlight') {
-        postControls({ auto_exposure: false, exposure_us: 8000, gain: 8.0, awb_mode: 'auto', denoise_mode: 'high_quality' });
-        rangeExp.value = 8000; valExpUs.textContent = '8000 \u03bcs'; valExpMs.textContent = '(8.00 ms)';
-        rangeGain.value = 8.0; valGain.textContent = '8.00\u00d7';
-        selectDenoise.value = 'high_quality';
-        showToast('\uD83C\uDF19 \uC800\uC870\uB3C4 \uC57C\uAC04 \uC124\uC815 \uC801\uC6A9 (8ms, 8\u00d7, \uB178\uC774\uC988\uC81C\uAC70)');
-      } else if (action === 'focus') {
-        postDisplay({ zoom_mode: '2x', focus_peaking: true, peaking_color: 'green' });
-        chkPeaking.checked = true;
-        selectPeakingColor.value = 'green';
-        activeZoom = '2x';
-        document.querySelectorAll('.btn-tool[data-zoom]').forEach(b => b.classList.toggle('active', b.dataset.zoom === '2x'));
-        updateMinimap();
-        showToast('\uD83D\uDD0D \uB80C\uC988 \uCD08\uC810 \uB9DE\uCDA4 \uBAA8\uB4DC (2\u00d7 \uC90C + \uD3EC\uCEE4\uC2A4 \uD53c\uD0B9)');
-      }
-      currentExposureUs = parseInt(rangeExp.value, 10);
-      updateBlurCalculator();
-    });
-  });
-
-  // --- Baseball Rec Shutter Button (Tab 3) ---
-  const btnApplyRecShutter = document.getElementById('btn-apply-rec-shutter');
-  if (btnApplyRecShutter) {
-    btnApplyRecShutter.addEventListener('click', () => {
-      const speedKmh = parseFloat(inputBallSpeed.value) || 145;
-      const targetExp = speedKmh >= 150 ? 500 : 1000;
-      const targetGain = targetExp === 500 ? 8.0 : 4.0;
-      postControls({ auto_exposure: false, exposure_us: targetExp, gain: targetGain });
-      rangeExp.value = targetExp;
-      valExpUs.textContent = `${targetExp} \u03bcs`;
-      valExpMs.textContent = `(${(targetExp / 1000).toFixed(2)} ms)`;
-      rangeGain.value = targetGain;
-      valGain.textContent = `${targetGain.toFixed(2)}\u00d7`;
-      currentExposureUs = targetExp;
-      updateBlurCalculator();
-      showToast(`\u26BE \uD22C\uAD6C \uCD5C\uC801 \uC124\uC815 \uC801\uC6A9: ${targetExp / 1000}ms \uC154\uD130, ${targetGain}\u00d7 \uAC8C\uC778`);
+  if (btnShortcuts) btnShortcuts.addEventListener('click', () => { if (shortcutsModal) shortcutsModal.style.display = 'flex'; });
+  if (btnCloseModal) btnCloseModal.addEventListener('click', () => { if (shortcutsModal) shortcutsModal.style.display = 'none'; });
+  if (shortcutsModal) {
+    shortcutsModal.addEventListener('click', (e) => {
+      if (e.target === shortcutsModal) shortcutsModal.style.display = 'none';
     });
   }
 
-  // --- Sliders & Controls ---
-  rangeExp.addEventListener('input', () => {
-    isDraggingSlider = true;
-    const us = parseInt(rangeExp.value, 10);
-    valExpUs.textContent = us + ' \u03bcs';
-    valExpMs.textContent = '(' + (us / 1000).toFixed(2) + ' ms)';
-    currentExposureUs = us;
-    updateBlurCalculator();
-    document.querySelectorAll('.btn-chip[data-exp]').forEach(b => {
-      b.classList.toggle('active', parseInt(b.dataset.exp, 10) === us);
-    });
-    postControls({ exposure_us: us });
-  });
-
-  rangeExp.addEventListener('change', () => { isDraggingSlider = false; });
-
-  document.querySelectorAll('.btn-chip[data-exp]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const us = parseInt(btn.dataset.exp, 10);
-      rangeExp.value = us;
-      valExpUs.textContent = us + ' \u03bcs';
-      valExpMs.textContent = '(' + (us / 1000).toFixed(2) + ' ms)';
-      currentExposureUs = us;
-      updateBlurCalculator();
-      document.querySelectorAll('.btn-chip[data-exp]').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      postControls({ exposure_us: us });
-    });
-  });
-
-  rangeGain.addEventListener('input', () => {
-    isDraggingSlider = true;
-    const g = parseFloat(rangeGain.value);
-    valGain.textContent = g.toFixed(2) + '\u00d7';
-    document.querySelectorAll('.btn-chip[data-gain]').forEach(b => {
-      b.classList.toggle('active', Math.abs(parseFloat(b.dataset.gain) - g) < 0.1);
-    });
-    postControls({ gain: g });
-  });
-
-  rangeGain.addEventListener('change', () => { isDraggingSlider = false; });
-
-  document.querySelectorAll('.btn-chip[data-gain]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const g = parseFloat(btn.dataset.gain);
-      rangeGain.value = g;
-      valGain.textContent = g.toFixed(2) + '\u00d7';
-      document.querySelectorAll('.btn-chip[data-gain]').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      postControls({ gain: g });
-    });
-  });
-
-  aeRadios.forEach(radio => {
-    radio.addEventListener('change', () => {
-      const isAuto = radio.value === 'auto';
-      manualExpGroup.style.opacity = isAuto ? '0.4' : '1.0';
-      manualGainGroup.style.opacity = isAuto ? '0.4' : '1.0';
-      aeOptions.style.display = isAuto ? 'block' : 'none';
-      postControls({ auto_exposure: isAuto });
-    });
-  });
-
-  rangeAeMaxExp.addEventListener('input', () => {
-    valAeMaxExp.textContent = rangeAeMaxExp.value + ' \u03bcs';
-    postControls({ ae_max_exposure_us: parseInt(rangeAeMaxExp.value, 10) });
-  });
-
-  rangeAeMaxGain.addEventListener('input', () => {
-    valAeMaxGain.textContent = parseFloat(rangeAeMaxGain.value).toFixed(1) + '\u00d7';
-    postControls({ ae_max_gain: parseFloat(rangeAeMaxGain.value) });
-  });
-
-  chkAeLock.addEventListener('change', () => {
-    postControls({ ae_lock: chkAeLock.checked });
-  });
-
-  rangeEv.addEventListener('input', () => {
-    valEv.textContent = (parseFloat(rangeEv.value) > 0 ? '+' : '') + parseFloat(rangeEv.value).toFixed(1) + ' EV';
-    postControls({ ev_compensation: parseFloat(rangeEv.value) });
-  });
-
-  selectAntibanding.addEventListener('change', () => {
-    postControls({ antibanding: selectAntibanding.value });
-  });
-
-  selectAwb.addEventListener('change', () => {
-    postControls({ awb_mode: selectAwb.value });
-  });
-
-  chkAwbLock.addEventListener('change', () => {
-    postControls({ awb_lock: chkAwbLock.checked });
-  });
-
-  rangeIspGain.addEventListener('input', () => {
-    valIspGain.textContent = parseFloat(rangeIspGain.value).toFixed(1) + '\u00d7';
-    postControls({ isp_digital_gain: parseFloat(rangeIspGain.value) });
-  });
-
-  selectDenoise.addEventListener('change', () => {
-    postControls({ denoise_mode: selectDenoise.value });
-  });
-
-  selectEdge.addEventListener('change', () => {
-    postControls({ edge_mode: selectEdge.value });
-  });
-
-  inputBallSpeed.addEventListener('input', updateBlurCalculator);
-  inputFovWidth.addEventListener('input', updateBlurCalculator);
-
-  // Zoom Modes & Minimap
+  // --- Zoom & Minimap Handlers ---
   zoomBtns.forEach(btn => {
     btn.addEventListener('click', () => {
       zoomBtns.forEach(b => b.classList.remove('active'));
@@ -722,42 +732,128 @@
     });
   });
 
-  chkPeaking.addEventListener('change', () => {
-    postDisplay({ focus_peaking: chkPeaking.checked });
+  if (chkPeaking) {
+    chkPeaking.addEventListener('change', () => postDisplay({ focus_peaking: chkPeaking.checked }));
+  }
+  if (selectPeakingColor) {
+    selectPeakingColor.addEventListener('change', () => postDisplay({ peaking_color: selectPeakingColor.value }));
+  }
+  if (chkZebra) {
+    chkZebra.addEventListener('change', () => postDisplay({ zebra_stripes: chkZebra.checked }));
+  }
+  if (selectGrid) {
+    selectGrid.addEventListener('change', () => postDisplay({ grid_mode: selectGrid.value }));
+  }
+  if (selectViewFps) {
+    selectViewFps.addEventListener('change', () => postDisplay({ fps_limit: parseInt(selectViewFps.value, 10) }));
+  }
+
+  // Viewport Click-to-Center Pan
+  if (viewportWrap) {
+    viewportWrap.addEventListener('click', (e) => {
+      if (activeZoom === 'fit') return;
+      const rect = viewportWrap.getBoundingClientRect();
+      activeCenterX = (e.clientX - rect.left) / rect.width;
+      activeCenterY = (e.clientY - rect.top) / rect.height;
+      postDisplay({ center_x: activeCenterX, center_y: activeCenterY });
+      updateMinimap();
+    });
+  }
+
+  // --- Sliders & Controls Event Listeners ---
+  if (rangeExp) {
+    rangeExp.addEventListener('input', () => {
+      const us = parseInt(rangeExp.value, 10);
+      if (valExpUs) valExpUs.textContent = us;
+      if (valExpMs) valExpMs.textContent = (us / 1000).toFixed(2) + ' ms';
+      currentExposureUs = us;
+      updateBlurCalculator();
+      document.querySelectorAll('.btn-chip[data-exp]').forEach(b => {
+        b.classList.toggle('active', parseInt(b.dataset.exp, 10) === us);
+      });
+      postControls({ exposure_us: us });
+    });
+  }
+
+  document.querySelectorAll('.btn-chip[data-exp]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const us = parseInt(btn.dataset.exp, 10);
+      rangeExp.value = us;
+      rangeExp.dispatchEvent(new Event('input'));
+    });
   });
 
-  selectPeakingColor.addEventListener('change', () => {
-    postDisplay({ peaking_color: selectPeakingColor.value });
+  if (rangeGain) {
+    rangeGain.addEventListener('input', () => {
+      const g = parseFloat(rangeGain.value);
+      if (valGain) valGain.textContent = g.toFixed(2);
+      document.querySelectorAll('.btn-chip[data-gain]').forEach(b => {
+        b.classList.toggle('active', Math.abs(parseFloat(b.dataset.gain) - g) < 0.1);
+      });
+      postControls({ gain: g });
+    });
+  }
+
+  document.querySelectorAll('.btn-chip[data-gain]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const g = parseFloat(btn.dataset.gain);
+      rangeGain.value = g;
+      rangeGain.dispatchEvent(new Event('input'));
+    });
   });
 
-  chkZebra.addEventListener('change', () => {
-    postDisplay({ zebra_stripes: chkZebra.checked });
+  document.querySelectorAll('input[name="ae-mode"]').forEach(r => {
+    r.addEventListener('change', () => {
+      const isAuto = r.value === 'auto';
+      document.querySelectorAll('.seg-group input[name="ae-mode"]').forEach(inp => {
+        inp.closest('.seg-btn').classList.toggle('active', inp.checked);
+      });
+      if (manualExpGroup) manualExpGroup.style.opacity = isAuto ? '0.4' : '1.0';
+      if (manualGainGroup) manualGainGroup.style.opacity = isAuto ? '0.4' : '1.0';
+      if (aeOptions) aeOptions.style.display = isAuto ? 'block' : 'none';
+      postControls({ auto_exposure: isAuto });
+    });
   });
 
-  selectGrid.addEventListener('change', () => {
-    postDisplay({ grid_mode: selectGrid.value });
-  });
+  if (rangeAeMaxExp) {
+    rangeAeMaxExp.addEventListener('input', () => {
+      valAeMaxExp.textContent = rangeAeMaxExp.value + ' \u03bcs';
+      postControls({ ae_max_exposure_us: parseInt(rangeAeMaxExp.value, 10) });
+    });
+  }
+  if (rangeAeMaxGain) {
+    rangeAeMaxGain.addEventListener('input', () => {
+      valAeMaxGain.textContent = parseFloat(rangeAeMaxGain.value).toFixed(1) + '\u00d7';
+      postControls({ ae_max_gain: parseFloat(rangeAeMaxGain.value) });
+    });
+  }
+  if (chkAeLock) chkAeLock.addEventListener('change', () => postControls({ ae_lock: chkAeLock.checked }));
+  if (rangeEv) {
+    rangeEv.addEventListener('input', () => {
+      const ev = parseFloat(rangeEv.value);
+      valEv.textContent = (ev >= 0 ? '+' : '') + ev.toFixed(2) + ' EV';
+      postControls({ ev_compensation: ev });
+    });
+  }
+  if (selectAntibanding) selectAntibanding.addEventListener('change', () => postControls({ antibanding: selectAntibanding.value }));
+  if (selectAwb) selectAwb.addEventListener('change', () => postControls({ awb_mode: selectAwb.value }));
+  if (chkAwbLock) chkAwbLock.addEventListener('change', () => postControls({ awb_lock: chkAwbLock.checked }));
+  if (rangeIspGain) {
+    rangeIspGain.addEventListener('input', () => {
+      valIspGain.textContent = parseFloat(rangeIspGain.value).toFixed(1) + '\u00d7';
+      postControls({ isp_digital_gain: parseFloat(rangeIspGain.value) });
+    });
+  }
+  if (selectDenoise) selectDenoise.addEventListener('change', () => postControls({ denoise_mode: selectDenoise.value }));
+  if (selectEdge) selectEdge.addEventListener('change', () => postControls({ edge_mode: selectEdge.value }));
 
-  selectViewFps.addEventListener('change', () => {
-    postDisplay({ fps_limit: parseInt(selectViewFps.value, 10) });
-  });
-
-  // Viewport Click-to-Center (for 1x and 2x zoom)
-  viewportWrap.addEventListener('click', (e) => {
-    if (activeZoom === 'fit') return;
-    const rect = viewportWrap.getBoundingClientRect();
-    activeCenterX = (e.clientX - rect.left) / rect.width;
-    activeCenterY = (e.clientY - rect.top) / rect.height;
-    postDisplay({ center_x: activeCenterX, center_y: activeCenterY });
-    updateMinimap();
-  });
-
-  // Presets
+  // Presets load/save
   function loadPresetList() {
+    if (!presetSelect) return;
     fetch('/api/presets')
       .then(r => r.json())
       .then(list => {
-        presetSelect.innerHTML = '';
+        presetSelect.innerHTML = '<option value="">Preset...</option>';
         list.forEach(name => {
           const opt = document.createElement('option');
           opt.value = name;
@@ -768,57 +864,58 @@
       .catch(console.error);
   }
 
-  btnLoadPreset.addEventListener('click', () => {
-    const name = presetSelect.value;
-    if (!name) return;
-    fetch(`/api/presets/${encodeURIComponent(name)}`)
-      .then(r => r.json())
-      .then(data => {
-        applyStateToUI(data);
-        if (data.controls) postControls(data.controls);
-        if (data.display) postDisplay(data.display);
-        showToast(`Loaded preset: ${name}`);
-      })
-      .catch(e => showToast('Failed to load preset: ' + e));
-  });
+  if (btnLoadPreset) {
+    btnLoadPreset.addEventListener('click', () => {
+      const name = presetSelect.value;
+      if (!name) return;
+      fetch(`/api/presets/${encodeURIComponent(name)}`)
+        .then(r => r.json())
+        .then(data => {
+          applyStateToUI(data);
+          if (data.controls) postControls(data.controls);
+          if (data.display) postDisplay(data.display);
+          showToast(`Loaded preset: ${name}`);
+        })
+        .catch(e => showToast('Failed to load preset: ' + e));
+    });
+  }
 
-  btnSavePreset.addEventListener('click', () => {
-    const name = prompt('Preset name (alphanumeric/hyphen):');
-    if (!name) return;
-    fetch('/api/state')
-      .then(r => r.json())
-      .then(state => {
-        const payload = {
-          description: 'User saved studio preset',
-          controls: state.controls,
-          display: state.display_settings
-        };
-        return fetch(`/api/presets/${encodeURIComponent(name)}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-      })
-      .then(r => r.json())
-      .then(() => {
-        showToast(`Preset saved: ${name}`);
-        loadPresetList();
-      })
-      .catch(e => showToast('Failed to save preset: ' + e));
-  });
+  if (btnSavePreset) {
+    btnSavePreset.addEventListener('click', () => {
+      const name = prompt('Preset name:');
+      if (!name) return;
+      fetch('/api/state')
+        .then(r => r.json())
+        .then(state => {
+          const payload = {
+            description: 'User saved preset',
+            controls: state.controls,
+            display: state.display_settings
+          };
+          return fetch(`/api/presets/${encodeURIComponent(name)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+        })
+        .then(r => r.json())
+        .then(() => {
+          showToast(`Preset saved: ${name}`);
+          loadPresetList();
+        })
+        .catch(e => showToast('Failed to save preset: ' + e));
+    });
+  }
 
-  // --- Initialization ---
-  fetch('/api/state')
-    .then(r => r.json())
-    .then(applyStateToUI)
-    .catch(console.error);
-
+  // --- Initial Launch ---
+  fetch('/api/state').then(r => r.json()).then(applyStateToUI).catch(console.error);
   setupSSE();
   updateBlurCalculator();
   loadPresetList();
-  loadSnapshotGallery();
+  loadMediaGallery();
+
   if (window.location.hash) {
-    const initTab = document.querySelector(`.tab-btn[data-tab="${window.location.hash.substring(1)}"]`);
+    const initTab = document.querySelector(`.itab-btn[data-tab="${window.location.hash.substring(1)}"]`);
     if (initTab) initTab.click();
   }
 })();

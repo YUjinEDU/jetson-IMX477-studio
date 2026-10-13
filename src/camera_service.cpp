@@ -42,6 +42,8 @@ static void wake_futex(std_atomic_u32* word) {
 
 struct CameraService::Impl {
     CameraCapabilities caps;
+    std::mutex mode_mu;
+    int active_sensor_mode{2};
     mutable std::mutex controls_mu;
     CameraControls current_controls;
     CameraControls pending_controls;
@@ -101,6 +103,23 @@ CameraCapabilities CameraService::get_capabilities() const {
     return impl_->caps;
 }
 
+int CameraService::get_sensor_mode() const {
+    return impl_->active_sensor_mode;
+}
+
+bool CameraService::set_sensor_mode(int mode_index) {
+    if (mode_index < 0 || mode_index > 2) return false;
+    std::unique_lock<std::mutex> lock(impl_->mode_mu);
+    if (impl_->active_sensor_mode == mode_index && running_.load()) {
+        return true;
+    }
+    int ai_w = impl_->ai_width;
+    std::string shm_name = impl_->shm_name_str;
+    stop();
+    impl_->active_sensor_mode = mode_index;
+    return start(ai_w, shm_name, mode_index);
+}
+
 CameraControls CameraService::get_controls() const {
     std::lock_guard<std::mutex> lock(impl_->controls_mu);
     return impl_->current_controls;
@@ -121,15 +140,18 @@ void CameraService::update_controls(const CameraControls& c) {
     impl_->controls_dirty.store(true);
 }
 
-bool CameraService::start(int ai_width, const std::string& shm_name) {
+bool CameraService::start(int ai_width, const std::string& shm_name, int sensor_mode) {
     if (running_.load()) return true;
 
-    impl_->ai_width = ai_width;
-    impl_->ai_height = ai_width ? ((int)std::lround(990.0 * ai_width / 1332) & ~1) : 0;
+    if (sensor_mode < 0 || sensor_mode > 2) sensor_mode = 2;
+    impl_->active_sensor_mode = sensor_mode;
     impl_->shm_name_str = shm_name;
+    impl_->ai_width = ai_width;
 
     // 1. Initialize Argus
-    impl_->camera_provider.reset(CameraProvider::create());
+    if (!impl_->camera_provider) {
+        impl_->camera_provider.reset(CameraProvider::create());
+    }
     auto cp = interface_cast<ICameraProvider>(impl_->camera_provider);
     if (!cp) return false;
 
@@ -140,19 +162,35 @@ bool CameraService::start(int ai_width, const std::string& shm_name) {
     auto props = interface_cast<ICameraProperties>(devs[0]);
     std::vector<SensorMode*> modes;
     props->getBasicSensorModes(&modes);
-    if (modes.size() < 3) return false;
+    if (modes.size() < 3 || (size_t)sensor_mode >= modes.size()) return false;
 
-    auto mode2 = interface_cast<ISensorMode>(modes[2]);
-    if (mode2->getResolution().width() != 1332 || mode2->getResolution().height() != 990) {
-        return false;
+    auto sm = interface_cast<ISensorMode>(modes[sensor_mode]);
+    uint32_t sm_w = sm->getResolution().width();
+    uint32_t sm_h = sm->getResolution().height();
+
+    impl_->caps.active_sensor_mode = sensor_mode;
+    impl_->caps.width = sm_w;
+    impl_->caps.height = sm_h;
+    impl_->caps.min_exposure_us = sm->getExposureTimeRange().min() / 1000ULL;
+    impl_->caps.min_gain = sm->getAnalogGainRange().min();
+    impl_->caps.max_gain = sm->getAnalogGainRange().max();
+
+    uint64_t frame_duration_ns = 8333333ULL;
+    if (sensor_mode == 0) {
+        impl_->caps.target_fps = 30.0;
+        frame_duration_ns = 33333333ULL;
+        impl_->caps.max_exposure_us = std::min<uint64_t>(33333ULL, sm->getExposureTimeRange().max() / 1000ULL);
+    } else if (sensor_mode == 1) {
+        impl_->caps.target_fps = 60.0;
+        frame_duration_ns = 16666666ULL;
+        impl_->caps.max_exposure_us = std::min<uint64_t>(16666ULL, sm->getExposureTimeRange().max() / 1000ULL);
+    } else {
+        impl_->caps.target_fps = 120.0;
+        frame_duration_ns = 8333333ULL;
+        impl_->caps.max_exposure_us = std::min<uint64_t>(8333ULL, sm->getExposureTimeRange().max() / 1000ULL);
     }
 
-    impl_->caps.width = 1332;
-    impl_->caps.height = 990;
-    impl_->caps.min_exposure_us = mode2->getExposureTimeRange().min() / 1000ULL;
-    impl_->caps.max_exposure_us = std::min<uint64_t>(8333ULL, mode2->getExposureTimeRange().max() / 1000ULL);
-    impl_->caps.min_gain = mode2->getAnalogGainRange().min();
-    impl_->caps.max_gain = mode2->getAnalogGainRange().max();
+    impl_->ai_height = ai_width ? ((int)std::lround((double)sm_h * ai_width / sm_w) & ~1) : 0;
 
     impl_->capture_session.reset(cp->createCaptureSession(devs[0]));
     auto cs = interface_cast<ICaptureSession>(impl_->capture_session);
@@ -162,7 +200,7 @@ bool CameraService::start(int ai_width, const std::string& shm_name) {
     UniqueObj<OutputStreamSettings> ss_main(cs->createOutputStreamSettings(STREAM_TYPE_EGL));
     auto es_main = interface_cast<IEGLOutputStreamSettings>(ss_main);
     es_main->setPixelFormat(PIXEL_FMT_YCbCr_420_888);
-    es_main->setResolution(Size2D<uint32_t>(1332, 990));
+    es_main->setResolution(Size2D<uint32_t>(sm_w, sm_h));
     es_main->setMode(EGL_STREAM_MODE_FIFO);
     es_main->setFifoLength(16);
     es_main->setMetadataEnable(true);
@@ -191,8 +229,8 @@ bool CameraService::start(int ai_width, const std::string& shm_name) {
     }
 
     auto src = interface_cast<ISourceSettings>(impl_->request);
-    src->setSensorMode(modes[2]);
-    src->setFrameDurationRange(Range<uint64_t>(8333333, 8333333));
+    src->setSensorMode(modes[sensor_mode]);
+    src->setFrameDurationRange(Range<uint64_t>(frame_duration_ns, frame_duration_ns));
 
     {
         std::lock_guard<std::mutex> lock(impl_->controls_mu);
@@ -289,6 +327,13 @@ void CameraService::stop() {
         shm_unlink(impl_->shm_name_str.c_str());
         impl_->shm_fd = -1;
     }
+    impl_->request.reset();
+    impl_->main_consumer.reset();
+    impl_->ai_consumer.reset();
+    impl_->main_stream.reset();
+    impl_->ai_stream.reset();
+    impl_->capture_session.reset();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
 }
 
 void CameraService::Impl::apply_controls_to_request() {
@@ -445,7 +490,7 @@ void CameraService::Impl::main_loop(std::atomic<bool>& running) {
                 auto native = interface_cast<NV::IImageNativeBuffer>(f->getImage());
                 if (native) {
                     if (disp_buf_fd < 0) {
-                        disp_buf_fd = native->createNvBuffer(Size2D<uint32_t>(1332, 990),
+                        disp_buf_fd = native->createNvBuffer(Size2D<uint32_t>(caps.width, caps.height),
                                                              NVBUF_COLOR_FORMAT_NV12,
                                                              NVBUF_LAYOUT_PITCH);
                         NvBufSurfaceFromFd(disp_buf_fd, (void**)&disp_surface);
