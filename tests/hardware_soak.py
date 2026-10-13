@@ -35,7 +35,12 @@ def main():
     # Verify studio is reachable
     try:
         init_state = get_json("/api/state")
+        init_cm = init_state["camera_metrics"]
+        init_frames = init_cm["total_frames"]
+        init_gaps = init_cm["sequence_gaps"]
+        init_anomalies = init_cm["bad_intervals"]
         print(f"Connected to Studio! Capabilities: {init_state['capabilities']['width']}x{init_state['capabilities']['height']}@{init_state['capabilities']['target_fps']}fps")
+        print(f"Trial baseline: initial frame={init_frames}, gaps={init_gaps}")
     except Exception as e:
         print(f"Failed to connect to studio: {e}")
         return 1
@@ -90,36 +95,36 @@ def main():
     stop_event.set()
     worker_thread.join(timeout=2)
 
-    # Final verification
+    # Final verification of interval deltas
+    t_elapsed = time.monotonic() - t0
     final_state = get_json("/api/state")
     final_cm = final_state["camera_metrics"]
 
-    total_frames = final_cm["total_frames"]
-    sensor_fps = final_cm["sensor_fps"]
-    host_fps = final_cm["host_fps"]
-    gaps = final_cm["sequence_gaps"]
-    bad_iv = final_cm["bad_intervals"]
+    interval_frames = final_cm["total_frames"] - init_frames
+    interval_gaps = final_cm["sequence_gaps"] - init_gaps
+    interval_anomalies = final_cm["bad_intervals"] - init_anomalies
+    interval_fps = interval_frames / t_elapsed
 
     print("\n==========================================")
-    print("        60s SOAK TEST RESULTS             ")
+    print("     65s INTERVAL SOAK TEST RESULTS       ")
     print("==========================================")
-    print(f"Total Frames Captured : {total_frames}")
-    print(f"Sensor FPS (measured) : {sensor_fps:.3f}")
-    print(f"Host Delivery FPS     : {host_fps:.3f}")
-    print(f"Sequence Gaps (lost)  : {gaps}")
-    print(f"Interval Anomalies    : {bad_iv}")
+    print(f"Interval Elapsed Time : {t_elapsed:.2f} s")
+    print(f"Interval Frames Added : {interval_frames}")
+    print(f"Trial-Local FPS       : {interval_fps:.3f} fps")
+    print(f"Interval Gaps (lost)  : {interval_gaps}")
+    print(f"Interval Anomalies    : {interval_anomalies}")
     print(f"Control Changes Made  : {control_changes}")
     print(f"API Errors            : {len(errors)}")
+    print(f"Daemon Lifetime Frames: {final_cm['total_frames']}")
 
+    min_expected_frames = math.floor(duration_s * 118.0)
     passed = (
-        gaps == 0
+        interval_gaps == 0
         and len(errors) == 0
-        and 118.0 <= sensor_fps <= 122.0
-        and 118.0 <= host_fps <= 122.0
+        and 118.0 <= interval_fps <= 122.0
         and control_changes >= 15
-        and total_frames >= 7200
+        and interval_frames >= min_expected_frames
     )
-
     print(f"FINAL RESULT: {'PASS' if passed else 'FAIL'}")
     print("==========================================")
     return 0 if passed else 1

@@ -47,6 +47,10 @@ bool HttpServer::start() {
     if (!impl_->web_dir.empty()) {
         impl_->svr.set_mount_point("/", impl_->web_dir);
     }
+    std::error_code ec_snap;
+    std::filesystem::create_directories("snapshots", ec_snap);
+    impl_->svr.set_mount_point("/snapshots", "snapshots");
+
 
     // 2. MJPEG Stream
     impl_->svr.Get("/stream.mjpg", [this](const httplib::Request&, httplib::Response& res) {
@@ -301,6 +305,25 @@ bool HttpServer::start() {
             res.set_content("{\"error\":\"Unknown snapshot exception\"}", "application/json");
         }
     });
+    // 7b. API: GET /api/snapshots
+    impl_->svr.Get("/api/snapshots", [](const httplib::Request&, httplib::Response& res) {
+        namespace fs = std::filesystem;
+        json list = json::array();
+        std::error_code ec;
+        if (fs::exists("snapshots", ec)) {
+            for (const auto& entry : fs::directory_iterator("snapshots", ec)) {
+                if (entry.is_regular_file() && entry.path().extension() == ".jpg") {
+                    list.push_back({
+                        {"filename", entry.path().filename().string()},
+                        {"url", "/snapshots/" + entry.path().filename().string()},
+                        {"size", (uint64_t)entry.file_size(ec)}
+                    });
+                }
+            }
+        }
+        res.set_content(list.dump(), "application/json");
+    });
+
 
     // 8. API: Presets
     impl_->svr.Get("/api/presets", [this](const httplib::Request&, httplib::Response& res) {
