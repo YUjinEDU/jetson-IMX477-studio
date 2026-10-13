@@ -180,9 +180,6 @@ int studio_client_read(StudioClient* client, void* out_buffer, size_t buffer_siz
                 if (r == 1 && timeout_ms >= 0 && client_now_ns() >= deadline_ns) return 1;
                 continue;
             }
-            if (latest > client->last_seq + 1) {
-                client->dropped_count += (latest - client->last_seq - 1);
-            }
             target_seq = latest;
             break;
         } else {
@@ -198,11 +195,9 @@ int studio_client_read(StudioClient* client, void* out_buffer, size_t buffer_siz
             }
             // Check if target_seq has been overwritten by the writer ring
             if (latest >= target_seq + h->num_slots) {
-                // Lapped by writer!
-                uint64_t lost = latest - target_seq;
-                client->dropped_count += lost;
+                // Lapped by writer! Catch up to newest available frame.
+                target_seq = latest;
                 overrun_flag = 2;
-                target_seq = latest; // catch up to latest
             }
             break;
         }
@@ -243,18 +238,21 @@ int studio_client_read(StudioClient* client, void* out_buffer, size_t buffer_siz
         uint64_t lock_after = slot->seqlock.load(std::memory_order_acquire);
         if (lock_before == lock_after) {
             if (out_meta->sequence != target_seq) {
-                uint64_t cur_latest = h->latest_seq.load(std::memory_order_acquire);
-                if (cur_latest > client->last_seq) {
-                    client->dropped_count += (cur_latest - client->last_seq - 1);
-                }
-                overrun_flag = 2;
-                target_seq = cur_latest;
+                // Writer updated slot while reading: catch up to newest
+                target_seq = h->latest_seq.load(std::memory_order_acquire);
                 slot_idx = (uint32_t)(target_seq % h->num_slots);
                 slot = get_slot(h, slot_idx);
                 payload = get_slot_payload(slot);
+                overrun_flag = 2;
                 continue;
             }
-            client->last_seq = target_seq;
+
+            // Successfully acquired consistent and sequence-verified frame
+            if (client->has_read_first && out_meta->sequence > client->last_seq + 1) {
+                client->dropped_count += (out_meta->sequence - client->last_seq - 1);
+                overrun_flag = 2;
+            }
+            client->last_seq = out_meta->sequence;
             client->has_read_first = true;
             return overrun_flag;
         }

@@ -54,8 +54,10 @@ int main() {
     header->futex_word.store(0);
     header->reader_heartbeat_ns.store(0);
 
-    // Test 1: FIFO reading 500 frames at 120fps (simulated)
-    std::atomic<bool> stop_writer{false};
+    // Test 1: FIFO reading 500 frames sequentially (open client BEFORE writer to ensure baseline=0)
+    StudioClient* client = studio_client_open(TEST_SHM_NAME, STUDIO_READ_FIFO);
+    assert(client != NULL);
+
     std::thread writer([&] {
         std::vector<uint8_t> frame_data(payload_bytes);
         for (uint64_t seq = 1; seq <= 500; ++seq) {
@@ -77,7 +79,6 @@ int main() {
             slot->height = h;
             slot->payload_bytes = payload_bytes;
 
-            // Pattern: fill first bytes with seq
             uint32_t magic_val = (uint32_t)seq;
             memcpy(payload, &magic_val, sizeof(magic_val));
 
@@ -88,9 +89,6 @@ int main() {
             std::this_thread::sleep_for(std::chrono::microseconds(100)); // fast simulation
         }
     });
-
-    StudioClient* client = studio_client_open(TEST_SHM_NAME, STUDIO_READ_FIFO);
-    assert(client != NULL);
 
     std::vector<uint8_t> buf(payload_bytes);
     StudioFrameMeta meta;
@@ -114,6 +112,52 @@ int main() {
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
     assert(r == 1); // timeout waiting for fresh frame
     assert(elapsed >= 40 && elapsed <= 150);
+    studio_client_close(client);
+    // Test 3: Forced Lapping Test (writer writes 100 frames while reader is paused)
+    // 100 frames > 64 slots, so writer will lap the ring buffer
+    client = studio_client_open(TEST_SHM_NAME, STUDIO_READ_FIFO);
+    assert(client != NULL);
+
+    auto write_slot = [&](uint64_t seq) {
+        uint32_t slot_idx = seq % STUDIO_SHM_MAX_SLOTS;
+        uint8_t* slot_base = (uint8_t*)ptr + sizeof(StudioShmHeader) + slot_idx * stride;
+        StudioSlotHeader* slot = (StudioSlotHeader*)slot_base;
+        uint8_t* payload = slot_base + sizeof(StudioSlotHeader);
+        slot->seqlock.fetch_add(1, std::memory_order_release);
+        slot->sequence = seq;
+        slot->sensor_timestamp_ns = seq * 8333333ULL;
+        slot->host_timestamp_ns = seq * 8333333ULL;
+        slot->width = w; slot->height = h; slot->payload_bytes = payload_bytes;
+        uint32_t val = (uint32_t)seq;
+        memcpy(payload, &val, sizeof(val));
+        slot->seqlock.fetch_add(1, std::memory_order_release);
+        header->latest_seq.store(seq, std::memory_order_release);
+        wake_futex(&header->futex_word);
+    };
+
+    // Initial read establishes fresh baseline: frame 501
+    write_slot(501);
+    r = studio_client_read(client, buf.data(), buf.size(), &meta, 100);
+    assert(r == 0 && meta.sequence == 501);
+    assert(studio_client_get_dropped(client) == 0);
+
+    // Writer laps reader by writing 100 frames (502..601) without reader reading
+    for (uint64_t seq = 502; seq <= 601; ++seq) {
+        write_slot(seq);
+    }
+
+    // Reader reads: must detect overrun, catch up to latest (601), and record exactly 99 dropped frames!
+    r = studio_client_read(client, buf.data(), buf.size(), &meta, 100);
+    assert(r == 2); // overrun reported!
+    assert(meta.sequence == 601);
+    assert(studio_client_get_dropped(client) == 99);
+
+    // Subsequent read: sequential frame 602 with no further drops
+    write_slot(602);
+    r = studio_client_read(client, buf.data(), buf.size(), &meta, 100);
+    assert(r == 0); // normal sequential read!
+    assert(meta.sequence == 602);
+    assert(studio_client_get_dropped(client) == 99);
     studio_client_close(client);
 
     munmap(ptr, total_size);
