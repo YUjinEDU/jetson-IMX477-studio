@@ -142,6 +142,13 @@ int studio_client_read(StudioClient* client, void* out_buffer, size_t buffer_siz
     uint64_t deadline_ns = timeout_ms >= 0 ? (client_now_ns() + (uint64_t)timeout_ms * 1000000ULL) : UINT64_MAX;
 
     int overrun_flag = 0;
+    if (timeout_ms == 0) {
+        uint64_t latest = h->latest_seq.load(std::memory_order_acquire);
+        if (latest == 0 || (!client->has_read_first && latest <= client->baseline_seq) ||
+            (client->has_read_first && client->mode == STUDIO_READ_LATEST && latest <= client->last_seq)) {
+            return 1; // Immediate non-blocking timeout
+        }
+    }
     uint64_t target_seq = 0;
 
 
@@ -234,7 +241,7 @@ int studio_client_read(StudioClient* client, void* out_buffer, size_t buffer_siz
         }
 
         memcpy(out_buffer, payload, slot->payload_bytes);
-
+        std::atomic_thread_fence(std::memory_order_acquire);
         uint64_t lock_after = slot->seqlock.load(std::memory_order_acquire);
         if (lock_before == lock_after) {
             if (out_meta->sequence != target_seq) {
@@ -250,7 +257,9 @@ int studio_client_read(StudioClient* client, void* out_buffer, size_t buffer_siz
             // Successfully acquired consistent and sequence-verified frame
             if (client->has_read_first && out_meta->sequence > client->last_seq + 1) {
                 client->dropped_count += (out_meta->sequence - client->last_seq - 1);
-                overrun_flag = 2;
+                if (client->mode == STUDIO_READ_FIFO) {
+                    overrun_flag = 2;
+                }
             }
             client->last_seq = out_meta->sequence;
             client->has_read_first = true;

@@ -294,6 +294,8 @@ void CameraService::stop() {
     if (!running_.exchange(false)) return;
     {
         std::lock_guard<std::mutex> dlock(impl_->display_mu);
+        impl_->display_wants_frame = false;
+        impl_->display_has_frame = false;
         impl_->display_cv.notify_all();
     }
 
@@ -308,12 +310,15 @@ void CameraService::stop() {
     if (impl_->main_thread.joinable()) impl_->main_thread.join();
     if (impl_->ai_thread.joinable()) impl_->ai_thread.join();
 
-    if (impl_->disp_surface) {
-        NvBufSurfaceUnMap(impl_->disp_surface, 0, -1);
-        NvBufSurfaceDestroy(impl_->disp_surface);
-        impl_->disp_surface = nullptr;
+    {
+        std::lock_guard<std::mutex> dlock(impl_->display_mu);
+        if (impl_->disp_surface) {
+            NvBufSurfaceUnMap(impl_->disp_surface, 0, -1);
+            NvBufSurfaceDestroy(impl_->disp_surface);
+            impl_->disp_surface = nullptr;
+        }
+        impl_->disp_buf_fd = -1;
     }
-    impl_->disp_buf_fd = -1;
 
     if (impl_->ai_surface) {
         NvBufSurfaceUnMap(impl_->ai_surface, 0, -1);
@@ -323,6 +328,8 @@ void CameraService::stop() {
     impl_->ai_buf_fd = -1;
 
     if (impl_->shm_header) {
+        impl_->shm_header->writer_pid = 0;
+        wake_futex(&impl_->shm_header->futex_word);
         munmap(impl_->shm_header, impl_->shm_size);
         impl_->shm_header = nullptr;
     }
@@ -473,7 +480,8 @@ void CameraService::Impl::main_loop(std::atomic<bool>& running) {
                     metrics.min_interval_ms = std::min(metrics.min_interval_ms, iv);
                     metrics.max_interval_ms = std::max(metrics.max_interval_ms, iv);
                 }
-                if (iv > 12.5 || iv < 4.17) {
+                double expected_iv = 1000.0 / std::max(1.0, caps.target_fps);
+                if (iv > expected_iv * 1.5 || iv < expected_iv * 0.5) {
                     metrics.bad_sensor_intervals++;
                 }
                 if (sensor_ts > first_ts) {
@@ -526,8 +534,8 @@ void CameraService::Impl::ai_loop(std::atomic<bool>& running) {
         }
 
         uint64_t hb = shm_header->reader_heartbeat_ns.load(std::memory_order_relaxed);
-        // Only do format copy if active readers exist (heartbeat within 2 seconds)
-        if (hb > 0 && host_now > hb && (host_now - hb) > 2000000000ULL) {
+        // Skip format copy if no active readers exist (heartbeat is 0 or expired > 2s)
+        if (hb == 0 || (host_now > hb && (host_now - hb) > 2000000000ULL)) {
             continue;
         }
 
@@ -555,6 +563,7 @@ void CameraService::Impl::ai_loop(std::atomic<bool>& running) {
         uint8_t* payload = slot_base + sizeof(StudioSlotHeader);
 
         slot->seqlock.fetch_add(1, std::memory_order_release); // odd
+        std::atomic_thread_fence(std::memory_order_release);
         slot->sequence = num;
         slot->sensor_timestamp_ns = sensor_ts;
         slot->host_timestamp_ns = host_now;
@@ -582,6 +591,7 @@ void CameraService::Impl::ai_loop(std::atomic<bool>& running) {
             off += (size_t)ai_width * h;
         }
 
+        std::atomic_thread_fence(std::memory_order_release);
         slot->seqlock.fetch_add(1, std::memory_order_release); // even
         shm_header->latest_seq.store(num, std::memory_order_release);
         wake_futex(&shm_header->futex_word);

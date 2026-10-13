@@ -88,6 +88,7 @@ void DisplayPipeline::decrement_viewers() {
 }
 
 bool DisplayPipeline::start() {
+    std::lock_guard<std::mutex> lock(lifecycle_mu_);
     if (running_.load()) return true;
     running_.store(true);
     worker_ = std::thread(&DisplayPipeline::run, this);
@@ -95,6 +96,7 @@ bool DisplayPipeline::start() {
 }
 
 void DisplayPipeline::stop() {
+    std::lock_guard<std::mutex> lock(lifecycle_mu_);
     if (!running_.exchange(false)) return;
     frame_cv_.notify_all();
     if (worker_.joinable()) worker_.join();
@@ -115,7 +117,7 @@ bool DisplayPipeline::get_latest_jpeg(std::vector<uint8_t>& out_jpeg,
 }
 
 void DisplayPipeline::run() {
-    uint64_t prev_frame_time = now_ns();
+    uint64_t next_frame_time = now_ns();
     std::vector<double> fps_history;
     uint64_t fps_window_start = now_ns();
     int frames_in_window = 0;
@@ -135,10 +137,10 @@ void DisplayPipeline::run() {
         int fps_target = std::clamp(s.fps_limit, 10, 60);
         uint64_t frame_interval_ns = 1000000000ULL / fps_target;
         uint64_t now = now_ns();
-        if (now < prev_frame_time + frame_interval_ns) {
-            std::this_thread::sleep_for(std::chrono::nanoseconds((prev_frame_time + frame_interval_ns) - now));
+        if (now < next_frame_time) {
+            std::this_thread::sleep_for(std::chrono::nanoseconds(next_frame_time - now));
         }
-        prev_frame_time = now_ns();
+        next_frame_time = std::max(now_ns(), next_frame_time + frame_interval_ns);
 
         // If no one is watching and no snapshot requested, sleep lightly and loop
         bool need_snap = false;
@@ -278,8 +280,8 @@ void DisplayPipeline::run() {
                                << "  \"analog_gain\": " << cm.actual_analog_gain << ",\n"
                                << "  \"isp_digital_gain\": " << cm.actual_isp_gain << ",\n"
                                << "  \"awb_cct\": " << cm.actual_cct << ",\n"
-                               << "  \"width\": 1332,\n"
-                               << "  \"height\": 990\n"
+                               << "  \"width\": " << src_w << ",\n"
+                               << "  \"height\": " << src_h << "\n"
                                << "}\n";
                         }
                     }
@@ -549,9 +551,13 @@ nlohmann::json DisplayPipeline::compute_calibration() {
     cv::Mat dist_coeffs = cv::Mat::zeros(8, 1, CV_64F);
     std::vector<cv::Mat> rvecs, tvecs;
 
-    double rms = cv::calibrateCamera(object_points, calib_corners_all_, calib_image_size_,
-                                     camera_matrix, dist_coeffs, rvecs, tvecs);
-
+    double rms = 0.0;
+    try {
+        rms = cv::calibrateCamera(object_points, calib_corners_all_, calib_image_size_,
+                                  camera_matrix, dist_coeffs, rvecs, tvecs);
+    } catch (const cv::Exception& e) {
+        return {{"status", "error"}, {"error", std::string("Calibration computation failed: ") + e.what()}};
+    }
     current_calibration_ = {
         {"status", "ok"},
         {"rms_reprojection_error", rms},

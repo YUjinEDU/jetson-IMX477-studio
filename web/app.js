@@ -124,6 +124,21 @@
   let activeCenterY = 0.5;
   let isSnapping = false;
   const fpsHistory = [];
+  let activeWidth = 1332;
+  let activeHeight = 990;
+  let pendingControls = {};
+  let pendingDisplay = {};
+  // --- Stream Auto-Reconnect ---
+  function reloadStream() {
+    if (!streamImg) return;
+    streamImg.src = '/stream.mjpg?t=' + Date.now();
+  }
+  if (streamImg) {
+    streamImg.onerror = () => {
+      setTimeout(reloadStream, 600);
+    };
+  }
+
 
   function showToast(msg) {
     if (!toast) return;
@@ -135,22 +150,28 @@
   // --- API Handlers ---
   function postControls(partial) {
     clearTimeout(postControlsTimer);
+    Object.assign(pendingControls, partial);
     postControlsTimer = setTimeout(() => {
+      const payload = { ...pendingControls };
+      pendingControls = {};
       fetch('/api/controls', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(partial)
+        body: JSON.stringify(payload)
       }).catch(err => console.error('Failed to post controls:', err));
     }, 40);
   }
 
   function postDisplay(partial) {
     clearTimeout(postDisplayTimer);
+    Object.assign(pendingDisplay, partial);
     postDisplayTimer = setTimeout(() => {
+      const payload = { ...pendingDisplay };
+      pendingDisplay = {};
       fetch('/api/display', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(partial)
+        body: JSON.stringify(payload)
       }).catch(err => console.error('Failed to post display:', err));
     }, 40);
   }
@@ -191,6 +212,7 @@
           showToast(`Active: ${d.width}×${d.height} @ ${d.target_fps} FPS`);
           // Re-fetch state for new exposure limits
           fetch('/api/state').then(r => r.json()).then(applyStateToUI);
+          reloadStream();
         } else {
           showToast(`Mode switch error: ${d.error || 'Failed'}`);
         }
@@ -320,7 +342,7 @@
     const expSec = currentExposureUs / 1e6;
     const blurMeters = speedMs * expSec;
     const blurCm = blurMeters * 100;
-    const blurPx = (blurMeters / fovM) * 1332;
+    const blurPx = (blurMeters / fovM) * activeWidth;
 
     if (calcBlurCm) calcBlurCm.textContent = blurCm.toFixed(1) + ' cm';
     if (calcBlurCmBadge) calcBlurCmBadge.textContent = blurCm.toFixed(1) + ' cm';
@@ -444,7 +466,7 @@
     minimapBox.style.display = 'block';
     if (hudZoom) hudZoom.textContent = `${activeZoom.toUpperCase()} (${Math.round(activeCenterX*100)}%, ${Math.round(activeCenterY*100)}%)`;
 
-    const cropFactor = (activeZoom === '1x') ? 0.72 : (activeZoom === '4x') ? 0.18 : 0.36;
+    const cropFactor = (activeZoom === '1x') ? Math.min(1.0, 960 / activeWidth) : (activeZoom === '4x') ? 0.25 : 0.5;
     const cropW = cropFactor;
     const cropH = cropFactor;
 
@@ -466,6 +488,8 @@
 
     if (caps) {
       if (caps.width && caps.height && hudRes) hudRes.textContent = `${caps.width}×${caps.height}`;
+      if (caps.width) activeWidth = caps.width;
+      if (caps.height) activeHeight = caps.height;
       if (caps.target_fps && hudSensor) hudSensor.textContent = `${caps.target_fps.toFixed(0)} FPS`;
       if (caps.active_sensor_mode !== undefined) {
         sensorModeBtns.forEach(b => b.classList.toggle('active', parseInt(b.dataset.sensorMode, 10) === caps.active_sensor_mode));
@@ -898,12 +922,15 @@
             body: JSON.stringify(payload)
           });
         })
-        .then(r => r.json())
-        .then(() => {
+        .then(async r => {
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok || data.status === 'error') {
+            throw new Error(data.error || 'Server rejected preset name');
+          }
           showToast(`Preset saved: ${name}`);
           loadPresetList();
         })
-        .catch(e => showToast('Failed to save preset: ' + e));
+        .catch(e => showToast(`Failed to save preset: ${e.message || e}`));
     });
   }
 

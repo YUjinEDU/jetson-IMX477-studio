@@ -58,6 +58,10 @@ bool HttpServer::start() {
     // 2. MJPEG Stream
     impl_->svr.Get("/stream.mjpg", [this](const httplib::Request&, httplib::Response& res) {
         impl_->display.increment_viewers();
+        res.set_header("Access-Control-Allow-Origin", "*");
+        res.set_header("Cache-Control", "no-cache, no-store, must-revalidate");
+        res.set_header("Pragma", "no-cache");
+        res.set_header("Expires", "0");
 
         res.set_chunked_content_provider(
             "multipart/x-mixed-replace; boundary=--frame",

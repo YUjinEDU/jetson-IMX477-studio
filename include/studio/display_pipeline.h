@@ -77,6 +77,7 @@ public:
 
 private:
     CameraService& camera_;
+    std::mutex lifecycle_mu_;
     std::atomic<bool> running_{false};
     std::thread worker_;
 
