@@ -153,7 +153,7 @@ class StudioCamera:
             t_conv_end = time.monotonic_ns()
             color_ms = (t_conv_end - t_conv_start) / 1e6
         else:
-            frame = nv12
+            frame = nv12.copy()
             color_ms = 0.0
 
         meta = {
@@ -188,4 +188,7 @@ class StudioCamera:
         return self
 
     def __exit__(self, *_):
+        self.close()
+
+    def __del__(self):
         self.close()

@@ -414,12 +414,78 @@
       .catch(console.error);
   }
 
+  function applyStateToUI(state) {
+    if (!state) return;
+    const ctrl = state.controls;
+    const ds = state.display_settings || state.display;
+
+    if (ctrl) {
+      if (ctrl.auto_exposure !== undefined) {
+        const radio = document.querySelector(`input[name="ae-mode"][value="${ctrl.auto_exposure ? 'auto' : 'manual'}"]`);
+        if (radio) radio.checked = true;
+        manualExpGroup.style.opacity = ctrl.auto_exposure ? '0.4' : '1.0';
+        manualGainGroup.style.opacity = ctrl.auto_exposure ? '0.4' : '1.0';
+        aeOptions.style.display = ctrl.auto_exposure ? 'block' : 'none';
+      }
+      if (ctrl.exposure_us !== undefined) {
+        rangeExp.value = ctrl.exposure_us;
+        valExpUs.textContent = ctrl.exposure_us + ' \u03bcs';
+        valExpMs.textContent = '(' + (ctrl.exposure_us / 1000).toFixed(2) + ' ms)';
+        currentExposureUs = ctrl.exposure_us;
+        updateBlurCalculator();
+        document.querySelectorAll('.btn-chip[data-exp]').forEach(b => {
+          b.classList.toggle('active', parseInt(b.dataset.exp, 10) === ctrl.exposure_us);
+        });
+      }
+      if (ctrl.gain !== undefined) {
+        rangeGain.value = ctrl.gain;
+        valGain.textContent = ctrl.gain.toFixed(2) + '\u00d7';
+        document.querySelectorAll('.btn-chip[data-gain]').forEach(b => {
+          b.classList.toggle('active', Math.abs(parseFloat(b.dataset.gain) - ctrl.gain) < 0.1);
+        });
+      }
+      if (ctrl.ae_max_exposure_us !== undefined) {
+        rangeAeMaxExp.value = ctrl.ae_max_exposure_us;
+        valAeMaxExp.textContent = ctrl.ae_max_exposure_us + ' \u03bcs';
+      }
+      if (ctrl.ae_max_gain !== undefined) {
+        rangeAeMaxGain.value = ctrl.ae_max_gain;
+        valAeMaxGain.textContent = parseFloat(ctrl.ae_max_gain).toFixed(1) + '\u00d7';
+      }
+      if (ctrl.ae_lock !== undefined) chkAeLock.checked = ctrl.ae_lock;
+      if (ctrl.ev_compensation !== undefined) {
+        rangeEv.value = ctrl.ev_compensation;
+        valEv.textContent = (ctrl.ev_compensation > 0 ? '+' : '') + parseFloat(ctrl.ev_compensation).toFixed(1) + ' EV';
+      }
+      if (ctrl.antibanding !== undefined) selectAntibanding.value = ctrl.antibanding;
+      if (ctrl.awb_mode !== undefined) selectAwb.value = ctrl.awb_mode;
+      if (ctrl.awb_lock !== undefined) chkAwbLock.checked = ctrl.awb_lock;
+      if (ctrl.isp_digital_gain !== undefined) {
+        rangeIspGain.value = ctrl.isp_digital_gain;
+        valIspGain.textContent = parseFloat(ctrl.isp_digital_gain).toFixed(1) + '\u00d7';
+      }
+      if (ctrl.denoise_mode !== undefined) selectDenoise.value = ctrl.denoise_mode;
+      if (ctrl.edge_mode !== undefined) selectEdge.value = ctrl.edge_mode;
+    }
+
+    if (ds) {
+      if (ds.zoom_mode !== undefined) {
+        zoomBtns.forEach(b => b.classList.toggle('active', b.dataset.zoom === ds.zoom_mode));
+      }
+      if (ds.focus_peaking !== undefined) chkPeaking.checked = ds.focus_peaking;
+      if (ds.zebra_stripes !== undefined) chkZebra.checked = ds.zebra_stripes;
+      if (ds.grid_mode !== undefined) selectGrid.value = ds.grid_mode;
+      if (ds.fps_limit !== undefined) selectViewFps.value = ds.fps_limit;
+    }
+  }
+
   btnLoadPreset.addEventListener('click', () => {
     const name = presetSelect.value;
     if (!name) return;
     fetch(`/api/presets/${encodeURIComponent(name)}`)
       .then(r => r.json())
       .then(data => {
+        applyStateToUI(data);
         if (data.controls) postControls(data.controls);
         if (data.display) postDisplay(data.display);
         showToast(`Loaded preset: ${name}`);
@@ -453,6 +519,10 @@
   });
 
   // Init
+  fetch('/api/state')
+    .then(r => r.json())
+    .then(applyStateToUI)
+    .catch(console.error);
   setupSSE();
   updateBlurCalculator();
   loadPresetList();

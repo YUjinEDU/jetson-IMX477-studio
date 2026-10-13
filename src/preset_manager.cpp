@@ -4,6 +4,18 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <cctype>
+
+static bool is_valid_preset_name(const std::string& name) {
+    if (name.empty() || name.size() > 64) return false;
+    for (char c : name) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') {
+            return false;
+        }
+    }
+    return true;
+}
+
 
 namespace fs = std::filesystem;
 
@@ -78,9 +90,7 @@ std::vector<std::string> PresetManager::list_presets() const {
 }
 
 bool PresetManager::save_preset(const std::string& name, const nlohmann::json& data) {
-    if (name.empty() || name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
-        return false;
-    }
+    if (!is_valid_preset_name(name)) return false;
     std::string path = storage_dir_ + "/" + name + ".json";
     std::ofstream out(path);
     if (!out) return false;
@@ -89,6 +99,7 @@ bool PresetManager::save_preset(const std::string& name, const nlohmann::json& d
 }
 
 bool PresetManager::load_preset(const std::string& name, nlohmann::json& out_data) const {
+    if (!is_valid_preset_name(name)) return false;
     std::string path = storage_dir_ + "/" + name + ".json";
     std::ifstream in(path);
     if (!in) return false;
@@ -101,7 +112,7 @@ bool PresetManager::load_preset(const std::string& name, nlohmann::json& out_dat
 }
 
 bool PresetManager::delete_preset(const std::string& name) {
-    if (name.empty() || name.find('/') != std::string::npos) return false;
+    if (!is_valid_preset_name(name)) return false;
     std::string path = storage_dir_ + "/" + name + ".json";
     std::error_code ec;
     return fs::remove(path, ec);

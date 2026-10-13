@@ -360,7 +360,10 @@ bool HttpServer::start() {
 }
 
 void HttpServer::stop() {
-    if (!running_.exchange(false)) return;
-    impl_->svr.stop();
-    if (thread_.joinable()) thread_.join();
+    if (running_.exchange(false)) {
+        impl_->svr.stop();
+    }
+    if (thread_.joinable()) {
+        thread_.join();
+    }
 }

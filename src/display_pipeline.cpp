@@ -82,8 +82,8 @@ void DisplayPipeline::increment_viewers() {
 }
 
 void DisplayPipeline::decrement_viewers() {
-    if (viewers_count_.load() > 0) {
-        viewers_count_.fetch_sub(1);
+    uint32_t val = viewers_count_.load(std::memory_order_relaxed);
+    while (val > 0 && !viewers_count_.compare_exchange_weak(val, val - 1, std::memory_order_release, std::memory_order_relaxed)) {
     }
 }
 
@@ -284,10 +284,15 @@ void DisplayPipeline::run() {
         }
 
 
+        // Grayscale conversion shared by Peaking and Zebra
+        cv::Mat gray;
+        if (s.focus_peaking || s.zebra_stripes) {
+            cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
+        }
+
         // 4. Overlays: Focus Peaking
         if (s.focus_peaking) {
-            cv::Mat gray, edges;
-            cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
+            cv::Mat edges;
             cv::Laplacian(gray, edges, CV_8U, 3);
             cv::Vec3b peak_color = (s.peaking_color == "red") ? cv::Vec3b(0, 0, 255)
                                  : (s.peaking_color == "cyan") ? cv::Vec3b(255, 255, 0)
@@ -307,8 +312,6 @@ void DisplayPipeline::run() {
         // 5. Overlays: Zebra Stripes (overexposure warning)
         if (s.zebra_stripes) {
             int z_thresh = std::clamp(s.zebra_threshold, 70, 100) * 255 / 100;
-            cv::Mat gray;
-            cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
             for (int r = 0; r < bgr.rows; ++r) {
                 const uint8_t* g_row = gray.ptr<uint8_t>(r);
                 cv::Vec3b* bgr_row = bgr.ptr<cv::Vec3b>(r);

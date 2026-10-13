@@ -82,7 +82,7 @@ def main():
             cm = state["camera_metrics"]
             dm = state["display_metrics"]
             elapsed = time.monotonic() - t0
-            print(f"  [{elapsed:4.1f}s] Frames: {cm['total_frames']} | Sensor FPS: {cm['sensor_fps']:.2f} | Host FPS: {cm['host_fps']:.2f} | Gaps: {cm['sequence_gaps']} | Exp: {cm['actual_exposure_us']}us | Gain: {cm['actual_analog_gain']/100:.1f}x")
+            print(f"  [{elapsed:4.1f}s] Frames: {cm['total_frames']} | Sensor FPS: {cm['sensor_fps']:.2f} | Host FPS: {cm['host_fps']:.2f} | Gaps: {cm['sequence_gaps']} | Exp: {cm['actual_exposure_us']}us | Gain: {cm['actual_analog_gain']:.1f}x")
             samples.append(cm)
         except Exception as e:
             errors.append(f"State GET failed: {e}")

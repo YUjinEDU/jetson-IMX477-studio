@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <chrono>
 #include <thread>
+#include <signal.h>
 
 static uint64_t client_now_ns() {
     struct timespec ts;
@@ -27,6 +28,7 @@ struct StudioClient {
     size_t mapped_size;
     StudioShmHeader* header;
     StudioReadMode mode;
+    uint64_t baseline_seq;
     uint64_t last_seq;
     uint64_t dropped_count;
     bool has_read_first;
@@ -79,6 +81,13 @@ StudioClient* studio_client_open(const char* shm_name, StudioReadMode mode) {
         close(fd);
         return NULL;
     }
+    if (h->num_slots == 0 || h->slot_stride_bytes == 0 ||
+        st.st_size < (off_t)(sizeof(StudioShmHeader) + (size_t)h->num_slots * h->slot_stride_bytes)) {
+        munmap(ptr, st.st_size);
+        close(fd);
+        return NULL;
+    }
+
 
     StudioClient* client = (StudioClient*)calloc(1, sizeof(StudioClient));
     if (!client) {
@@ -91,12 +100,13 @@ StudioClient* studio_client_open(const char* shm_name, StudioReadMode mode) {
     client->mapped_size = st.st_size;
     client->header = h;
     client->mode = mode;
-    client->last_seq = 0;
+    // Send initial reader heartbeat to awaken writer
+    h->reader_heartbeat_ns.store(client_now_ns(), std::memory_order_relaxed);
+
+    client->baseline_seq = h->latest_seq.load(std::memory_order_acquire);
+    client->last_seq = client->baseline_seq;
     client->dropped_count = 0;
     client->has_read_first = false;
-
-    // Send initial reader heartbeat
-    h->reader_heartbeat_ns.store(client_now_ns(), std::memory_order_relaxed);
     return client;
 }
 
@@ -134,7 +144,11 @@ int studio_client_read(StudioClient* client, void* out_buffer, size_t buffer_siz
     int overrun_flag = 0;
     uint64_t target_seq = 0;
 
+
     while (true) {
+        if (h->writer_pid > 0 && kill((pid_t)h->writer_pid, 0) != 0 && errno == ESRCH) {
+            return -1; // Camera service died
+        }
         uint64_t latest = h->latest_seq.load(std::memory_order_acquire);
         if (latest == 0) {
             // No frame has been produced yet
@@ -144,8 +158,21 @@ int studio_client_read(StudioClient* client, void* out_buffer, size_t buffer_siz
             continue;
         }
 
+        if (!client->has_read_first) {
+            // First read after opening: wait for a FRESH frame written after connection
+            if (latest <= client->baseline_seq) {
+                if (timeout_ms >= 0 && client_now_ns() >= deadline_ns) return 1;
+                uint32_t cur_val = h->futex_word.load(std::memory_order_relaxed);
+                int r = wait_futex(&h->futex_word, cur_val, 10);
+                if (r == 1 && timeout_ms >= 0 && client_now_ns() >= deadline_ns) return 1;
+                continue;
+            }
+            target_seq = latest;
+            break;
+        }
+
         if (client->mode == STUDIO_READ_LATEST) {
-            if (client->has_read_first && latest <= client->last_seq) {
+            if (latest <= client->last_seq) {
                 // Already read latest, wait for next
                 if (timeout_ms >= 0 && client_now_ns() >= deadline_ns) return 1;
                 uint32_t cur_val = h->futex_word.load(std::memory_order_relaxed);
@@ -153,36 +180,31 @@ int studio_client_read(StudioClient* client, void* out_buffer, size_t buffer_siz
                 if (r == 1 && timeout_ms >= 0 && client_now_ns() >= deadline_ns) return 1;
                 continue;
             }
-            if (client->has_read_first && latest > client->last_seq + 1) {
+            if (latest > client->last_seq + 1) {
                 client->dropped_count += (latest - client->last_seq - 1);
             }
             target_seq = latest;
             break;
         } else {
             // FIFO mode
-            if (!client->has_read_first) {
-                target_seq = latest;
-                break;
-            } else {
-                target_seq = client->last_seq + 1;
-                if (target_seq > latest) {
-                    // Waiting for target_seq to be written
-                    if (timeout_ms >= 0 && client_now_ns() >= deadline_ns) return 1;
-                    uint32_t cur_val = h->futex_word.load(std::memory_order_relaxed);
-                    int r = wait_futex(&h->futex_word, cur_val, 10);
-                    if (r == 1 && timeout_ms >= 0 && client_now_ns() >= deadline_ns) return 1;
-                    continue;
-                }
-                // Check if target_seq has been overwritten by the writer ring
-                if (latest >= target_seq + h->num_slots) {
-                    // Lapped by writer!
-                    uint64_t lost = latest - target_seq;
-                    client->dropped_count += lost;
-                    overrun_flag = 2;
-                    target_seq = latest; // catch up to latest
-                }
-                break;
+            target_seq = client->last_seq + 1;
+            if (target_seq > latest) {
+                // Waiting for target_seq to be written
+                if (timeout_ms >= 0 && client_now_ns() >= deadline_ns) return 1;
+                uint32_t cur_val = h->futex_word.load(std::memory_order_relaxed);
+                int r = wait_futex(&h->futex_word, cur_val, 10);
+                if (r == 1 && timeout_ms >= 0 && client_now_ns() >= deadline_ns) return 1;
+                continue;
             }
+            // Check if target_seq has been overwritten by the writer ring
+            if (latest >= target_seq + h->num_slots) {
+                // Lapped by writer!
+                uint64_t lost = latest - target_seq;
+                client->dropped_count += lost;
+                overrun_flag = 2;
+                target_seq = latest; // catch up to latest
+            }
+            break;
         }
     }
 
@@ -220,7 +242,18 @@ int studio_client_read(StudioClient* client, void* out_buffer, size_t buffer_siz
 
         uint64_t lock_after = slot->seqlock.load(std::memory_order_acquire);
         if (lock_before == lock_after) {
-            // Consistent read!
+            if (out_meta->sequence != target_seq) {
+                uint64_t cur_latest = h->latest_seq.load(std::memory_order_acquire);
+                if (cur_latest > client->last_seq) {
+                    client->dropped_count += (cur_latest - client->last_seq - 1);
+                }
+                overrun_flag = 2;
+                target_seq = cur_latest;
+                slot_idx = (uint32_t)(target_seq % h->num_slots);
+                slot = get_slot(h, slot_idx);
+                payload = get_slot_payload(slot);
+                continue;
+            }
             client->last_seq = target_seq;
             client->has_read_first = true;
             return overrun_flag;

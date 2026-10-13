@@ -106,15 +106,13 @@ int main() {
     assert(studio_client_get_dropped(client) == 0);
     studio_client_close(client);
 
-    // Test 2: Timeout check (reads current frame 500, then waits for next frame which never arrives)
+    // Test 2: Timeout check (writer finished at 500, waits for fresh frame >500 which never arrives)
     client = studio_client_open(TEST_SHM_NAME, STUDIO_READ_FIFO);
     assert(client != NULL);
-    int r_init = studio_client_read(client, buf.data(), buf.size(), &meta, 100);
-    assert(r_init == 0 && meta.sequence == 500);
     auto t0 = std::chrono::steady_clock::now();
     int r = studio_client_read(client, buf.data(), buf.size(), &meta, 50);
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
-    assert(r == 1); // timeout
+    assert(r == 1); // timeout waiting for fresh frame
     assert(elapsed >= 40 && elapsed <= 150);
     studio_client_close(client);
 

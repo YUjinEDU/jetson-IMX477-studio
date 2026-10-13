@@ -271,11 +271,14 @@ void CameraService::stop() {
         NvBufSurfaceDestroy(impl_->disp_surface);
         impl_->disp_surface = nullptr;
     }
+    impl_->disp_buf_fd = -1;
+
     if (impl_->ai_surface) {
         NvBufSurfaceUnMap(impl_->ai_surface, 0, -1);
         NvBufSurfaceDestroy(impl_->ai_surface);
         impl_->ai_surface = nullptr;
     }
+    impl_->ai_buf_fd = -1;
 
     if (impl_->shm_header) {
         munmap(impl_->shm_header, impl_->shm_size);
@@ -304,9 +307,9 @@ void CameraService::Impl::apply_controls_to_request() {
 
     // 1. Exposure and gain
     if (c.auto_exposure) {
-        uint64_t max_exp = std::min<uint64_t>(caps.max_exposure_us * 1000ULL, c.ae_max_exposure_us * 1000ULL);
+        uint64_t max_exp = std::clamp<uint64_t>(c.ae_max_exposure_us * 1000ULL, caps.min_exposure_us * 1000ULL, caps.max_exposure_us * 1000ULL);
         src->setExposureTimeRange(Range<uint64_t>(caps.min_exposure_us * 1000ULL, max_exp));
-        float max_g = std::min<float>(caps.max_gain, c.ae_max_gain);
+        float max_g = std::clamp<float>(c.ae_max_gain, caps.min_gain, caps.max_gain);
         src->setGainRange(Range<float>(caps.min_gain, max_g));
         ac->setAeLock(c.ae_lock);
     } else {
@@ -396,7 +399,7 @@ void CameraService::Impl::main_loop(std::atomic<bool>& running) {
 
             if (m) {
                 metrics.actual_exposure_us = m->getSensorExposureTime() / 1000ULL;
-                metrics.actual_analog_gain = m->getSensorSensitivity();
+                metrics.actual_analog_gain = m->getSensorAnalogGain();
                 metrics.actual_isp_gain = m->getIspDigitalGain();
                 metrics.actual_cct = m->getAwbCct();
                 BayerTuple<float> wb = m->getAwbGains();
@@ -508,7 +511,7 @@ void CameraService::Impl::ai_loop(std::atomic<bool>& running) {
         slot->host_timestamp_ns = host_now;
         if (m) {
             slot->exposure_ns = m->getSensorExposureTime();
-            slot->analog_gain = m->getSensorSensitivity();
+            slot->analog_gain = m->getSensorAnalogGain();
             slot->isp_digital_gain = m->getIspDigitalGain();
             slot->awb_cct = m->getAwbCct();
         }
