@@ -6,7 +6,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>IMX477 Cinema Studio</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=20261014_1030">
 </head>
 <body class="theme-studio">
   <!-- Top Global Bar -->
@@ -282,6 +282,54 @@
             <button id="btn-apply-rec-shutter" class="btn btn-outline" style="width: 100%; margin-top: 8px;">
               이 구속에 최적화된 셔터(1.0ms) 및 게인(4×) 적용
             </button>
+
+            <!-- Auto Pitch Detection & Clipping Panel -->
+            <div class="control-box" style="margin-top: 14px; border-left: 3px solid var(--accent);">
+              <div class="row-between">
+                <div>
+                  <span class="ctrl-name">자동 투구 감지 클립 녹화 (AUTO CLIP)</span>
+                  <p class="ctrl-desc">공의 움직임(배경 차분)이 감지되면 릴리스 전후를 3초간 자동 클립으로 저장합니다.</p>
+                </div>
+                <label class="studio-check">
+                  <input type="checkbox" id="chk-pitch-autoclip"> 활성화 (ON)
+                </label>
+              </div>
+
+              <!-- Motion level meter -->
+              <div class="row-between" style="margin-top: 8px;">
+                <span class="ctrl-name" style="font-size:11px;">현재 움직임 레벨:</span>
+                <span class="ctrl-val" id="val-pitch-motion">0 %</span>
+              </div>
+              <div class="meter-track" style="margin-top: 2px;">
+                <div id="pitch-motion-fill" class="meter-fill" style="width: 0%; background: var(--accent);"></div>
+              </div>
+
+              <div class="grid-2col" style="margin-top: 10px;">
+                <div>
+                  <span class="ctrl-name" style="font-size:11px;">사전 버퍼 (Pre-roll):</span>
+                  <p class="ctrl-desc">릴리스 이전 저장 시간</p>
+                  <select id="select-pitch-preroll" class="select-clean" style="width: 100%; margin-top: 4px;">
+                    <option value="1.0">1.0 초</option>
+                    <option value="1.5" selected>1.5 초 (권장)</option>
+                    <option value="2.0">2.0 초</option>
+                  </select>
+                </div>
+                <div>
+                  <span class="ctrl-name" style="font-size:11px;">사후 버퍼 (Post-roll):</span>
+                  <p class="ctrl-desc">포구 이후 저장 시간</p>
+                  <select id="select-pitch-postroll" class="select-clean" style="width: 100%; margin-top: 4px;">
+                    <option value="1.0">1.0 초</option>
+                    <option value="1.5" selected>1.5 초 (권장)</option>
+                    <option value="2.0">2.0 초</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="row-between" style="margin-top: 8px;">
+                <span class="ctrl-desc">추출된 투구 클립: <strong id="val-pitch-clips-count">0</strong> 개</span>
+                <span id="pitch-clip-status-badge" class="pill pill-muted">대기 중 (IDLE)</span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -479,6 +527,6 @@
 
   <div id="toast" class="toast-bar"></div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=20261014_1030"></script>
 </body>
 </html>

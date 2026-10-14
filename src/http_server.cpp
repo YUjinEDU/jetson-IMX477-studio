@@ -21,6 +21,7 @@ struct HttpServer::Impl {
     std::string host;
     int port;
     httplib::Server svr;
+    std::mutex sensor_mode_tx_mu;
 
     Impl(CameraService& c, DisplayPipeline& d, PresetManager& p,
          const std::string& wd, const std::string& h, int pt)
@@ -62,9 +63,11 @@ bool HttpServer::start() {
         res.set_header("Cache-Control", "no-cache, no-store, must-revalidate");
         res.set_header("Pragma", "no-cache");
         res.set_header("Expires", "0");
+        res.set_header("Connection", "keep-alive");
+        res.set_header("Keep-Alive", "timeout=60, max=10000");
 
         res.set_chunked_content_provider(
-            "multipart/x-mixed-replace; boundary=--frame",
+            "multipart/x-mixed-replace; boundary=frame",
             [this, seq = uint64_t(0), buf = std::vector<uint8_t>()](size_t, httplib::DataSink& sink) mutable {
                 if (!sink.is_writable || !sink.is_writable()) return false;
 
@@ -88,6 +91,20 @@ bool HttpServer::start() {
                 impl_->display.decrement_viewers();
             }
         );
+    });
+
+    // 2b. Single JPEG Frame API (Instant snapshot/fallback)
+    impl_->svr.Get("/api/frame.jpg", [this](const httplib::Request&, httplib::Response& res) {
+        std::vector<uint8_t> buf;
+        uint64_t seq = 0;
+        if (impl_->display.get_latest_jpeg(buf, seq, 100)) {
+            res.set_header("Access-Control-Allow-Origin", "*");
+            res.set_header("Cache-Control", "no-cache, no-store, must-revalidate");
+            res.set_content((const char*)buf.data(), buf.size(), "image/jpeg");
+        } else {
+            res.status = 503;
+            res.set_content("No frame available", "text/plain");
+        }
     });
 
     // 3. Server-Sent Events (Stats 4Hz)
@@ -278,6 +295,7 @@ bool HttpServer::start() {
     // 5b. API: POST /api/sensor_mode
     impl_->svr.Post("/api/sensor_mode", [this](const httplib::Request& req, httplib::Response& res) {
         try {
+            std::unique_lock<std::mutex> tx_lock(impl_->sensor_mode_tx_mu);
             json j = json::parse(req.body);
             int mode = j.value("mode", 2);
             if (mode < 0 || mode > 2) {
@@ -463,6 +481,66 @@ bool HttpServer::start() {
     impl_->svr.Get("/api/calibration", [this](const httplib::Request&, httplib::Response& res) {
         json calib = impl_->display.get_calibration();
         res.set_content(calib.dump(2), "application/json");
+    });
+
+    // 7e. API: Pitch Detection & Auto-Clipping
+    impl_->svr.Get("/api/pitch/status", [this](const httplib::Request&, httplib::Response& res) {
+        auto ps = impl_->display.get_pitch_status();
+        auto cfg = impl_->display.get_pitch_config();
+        json resp = {
+            {"enabled", ps.enabled},
+            {"is_clipping", ps.is_clipping},
+            {"motion_level", ps.current_motion_level},
+            {"total_clips", ps.total_clips},
+            {"last_clip_path", ps.last_clip_path},
+            {"config", {
+                {"threshold", cfg.motion_threshold},
+                {"min_motion_pixels", cfg.min_motion_pixels},
+                {"pre_roll_sec", cfg.pre_roll_sec},
+                {"post_roll_sec", cfg.post_roll_sec},
+                {"cooldown_sec", cfg.cooldown_sec}
+            }}
+        };
+        res.set_content(resp.dump(), "application/json");
+    });
+
+    impl_->svr.Post("/api/pitch/config", [this](const httplib::Request& req, httplib::Response& res) {
+        try {
+            json j = json::parse(req.body);
+            auto cfg = impl_->display.get_pitch_config();
+            if (j.contains("enabled")) cfg.enabled = j["enabled"].get<bool>();
+            if (j.contains("threshold")) cfg.motion_threshold = j["threshold"].get<int>();
+            if (j.contains("min_motion_pixels")) cfg.min_motion_pixels = j["min_motion_pixels"].get<int>();
+            if (j.contains("pre_roll_sec")) cfg.pre_roll_sec = j["pre_roll_sec"].get<float>();
+            if (j.contains("post_roll_sec")) cfg.post_roll_sec = j["post_roll_sec"].get<float>();
+            if (j.contains("cooldown_sec")) cfg.cooldown_sec = j["cooldown_sec"].get<float>();
+            impl_->display.update_pitch_config(cfg);
+            res.set_content("{\"status\":\"ok\"}", "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}", "application/json");
+        }
+    });
+
+    impl_->svr.Get("/api/pitch/clips", [](const httplib::Request&, httplib::Response& res) {
+        namespace fs = std::filesystem;
+        json list = json::array();
+        std::error_code ec;
+        if (fs::exists("recordings", ec)) {
+            for (const auto& entry : fs::directory_iterator("recordings", ec)) {
+                if (entry.is_regular_file()) {
+                    std::string fname = entry.path().filename().string();
+                    if (fname.rfind("pitch_", 0) == 0 && entry.path().extension() == ".avi") {
+                        list.push_back({
+                            {"filename", fname},
+                            {"url", "/recordings/" + fname},
+                            {"size", (uint64_t)entry.file_size(ec)}
+                        });
+                    }
+                }
+            }
+        }
+        res.set_content(list.dump(), "application/json");
     });
 
 

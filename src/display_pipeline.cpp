@@ -105,11 +105,16 @@ void DisplayPipeline::stop() {
 bool DisplayPipeline::get_latest_jpeg(std::vector<uint8_t>& out_jpeg,
                                       uint64_t& in_out_seq, int timeout_ms) {
     std::unique_lock<std::mutex> lock(frame_mu_);
+    if (in_out_seq == 0 && latest_seq_ > 0 && !latest_jpeg_.empty()) {
+        out_jpeg = latest_jpeg_;
+        in_out_seq = latest_seq_;
+        return true;
+    }
     if (!frame_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
                             [&] { return (latest_seq_ != in_out_seq && latest_seq_ > 0) || !running_.load(); })) {
         return false;
     }
-    if (!running_.load() || latest_seq_ == in_out_seq || latest_seq_ == 0) return false;
+    if (!running_.load() || latest_seq_ == in_out_seq || latest_seq_ == 0 || latest_jpeg_.empty()) return false;
 
     out_jpeg = latest_jpeg_;
     in_out_seq = latest_seq_;
@@ -142,22 +147,6 @@ void DisplayPipeline::run() {
         }
         next_frame_time = std::max(now_ns(), next_frame_time + frame_interval_ns);
 
-        // If no one is watching and no snapshot requested, sleep lightly and loop
-        bool need_snap = false;
-        {
-            std::lock_guard<std::mutex> lock(snapshot_mu_);
-            need_snap = snapshot_requested_;
-        }
-        bool is_rec = is_recording_.load();
-        bool is_calib = false;
-        {
-            std::lock_guard<std::mutex> clock(calib_mu_);
-            is_calib = calib_request_capture_;
-        }
-        if (viewers_count_.load() == 0 && !need_snap && !is_rec && !is_calib) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            continue;
-        }
 
         NvBufSurface* surface = nullptr;
         uint64_t seq = 0, sensor_ts = 0;
@@ -396,6 +385,73 @@ void DisplayPipeline::run() {
                 calib_cv_.notify_all();
             }
         }
+        // Pitch Motion Detection & Auto-Clipping
+        {
+            std::lock_guard<std::mutex> plock(pitch_mu_);
+            if (pitch_config_.enabled) {
+                cv::Mat det_gray;
+                if (gray.empty()) cv::cvtColor(bgr, det_gray, cv::COLOR_BGR2GRAY);
+                else det_gray = gray;
+
+                size_t max_pre_roll = (size_t)std::max(5, (int)(pitch_config_.pre_roll_sec * fps_target));
+                pre_roll_buffer_.push_back(bgr.clone());
+                while (pre_roll_buffer_.size() > max_pre_roll) {
+                    pre_roll_buffer_.pop_front();
+                }
+
+                if (!prev_detect_gray_.empty() && prev_detect_gray_.size() == det_gray.size()) {
+                    cv::Mat diff, thresh_mask;
+                    cv::absdiff(det_gray, prev_detect_gray_, diff);
+                    cv::threshold(diff, thresh_mask, pitch_config_.motion_threshold, 255, cv::THRESH_BINARY);
+                    int motion_pixels = cv::countNonZero(thresh_mask);
+                    int motion_pct = std::min(100, (motion_pixels * 100) / std::max(1, pitch_config_.min_motion_pixels * 2));
+                    pitch_status_.current_motion_level = motion_pct;
+
+                    uint64_t now = now_ns();
+                    uint64_t cooldown_ns = (uint64_t)(pitch_config_.cooldown_sec * 1000000000ULL);
+
+                    if (!pitch_status_.is_clipping && motion_pixels >= pitch_config_.min_motion_pixels &&
+                        (now - last_pitch_trigger_time_ns_ >= cooldown_ns)) {
+                        last_pitch_trigger_time_ns_ = now;
+                        pitch_status_.is_clipping = true;
+                        post_roll_remaining_ = (int)(pitch_config_.post_roll_sec * fps_target);
+
+                        std::error_code ec;
+                        std::filesystem::create_directories("recordings", ec);
+                        auto t = std::time(nullptr);
+                        struct tm tm;
+                        localtime_r(&t, &tm);
+                        std::ostringstream ss;
+                        ss << "recordings/pitch_" << std::put_time(&tm, "%Y%m%d_%H%M%S") << ".avi";
+                        std::string clip_path = ss.str();
+                        pitch_status_.last_clip_path = clip_path;
+
+                        pitch_clip_writer_.open(clip_path, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'),
+                                                30.0, cv::Size(target_w, target_h));
+                        if (pitch_clip_writer_.isOpened()) {
+                            for (const auto& f : pre_roll_buffer_) {
+                                pitch_clip_writer_.write(f);
+                            }
+                        }
+                    }
+                }
+                prev_detect_gray_ = det_gray.clone();
+
+                if (pitch_status_.is_clipping) {
+                    if (pitch_clip_writer_.isOpened()) {
+                        pitch_clip_writer_.write(bgr);
+                    }
+                    post_roll_remaining_--;
+                    if (post_roll_remaining_ <= 0) {
+                        pitch_clip_writer_.release();
+                        pitch_status_.is_clipping = false;
+                        pitch_status_.total_clips++;
+                    }
+                }
+            } else {
+                pitch_status_.current_motion_level = 0;
+            }
+        }
 
         // 7. JPEG Encode
         encoded.clear();
@@ -578,6 +634,28 @@ nlohmann::json DisplayPipeline::compute_calibration() {
         }}
     };
     return current_calibration_;
+}
+
+void DisplayPipeline::update_pitch_config(const PitchDetectConfig& cfg) {
+    std::lock_guard<std::mutex> lock(pitch_mu_);
+    pitch_config_ = cfg;
+    pitch_status_.enabled = cfg.enabled;
+    if (!cfg.enabled) {
+        if (pitch_clip_writer_.isOpened()) pitch_clip_writer_.release();
+        pitch_status_.is_clipping = false;
+        pre_roll_buffer_.clear();
+        prev_detect_gray_.release();
+    }
+}
+
+PitchDetectConfig DisplayPipeline::get_pitch_config() const {
+    std::lock_guard<std::mutex> lock(pitch_mu_);
+    return pitch_config_;
+}
+
+PitchDetectStatus DisplayPipeline::get_pitch_status() const {
+    std::lock_guard<std::mutex> lock(pitch_mu_);
+    return pitch_status_;
 }
 
 nlohmann::json DisplayPipeline::get_calibration() const {

@@ -97,6 +97,14 @@
   let recordTimerInterval = null;
   let recordSeconds = 0;
 
+  // Pitch Auto-Clip Elements
+  const chkPitchAutoClip = document.getElementById('chk-pitch-autoclip');
+  const valPitchMotion = document.getElementById('val-pitch-motion');
+  const pitchMotionFill = document.getElementById('pitch-motion-fill');
+  const selectPitchPreroll = document.getElementById('select-pitch-preroll');
+  const selectPitchPostroll = document.getElementById('select-pitch-postroll');
+  const valPitchClipsCount = document.getElementById('val-pitch-clips-count');
+  const pitchClipStatusBadge = document.getElementById('pitch-clip-status-badge');
   // Calibration Elements
   const btnCalibCapture = document.getElementById('btn-calib-capture');
   const btnCalibCompute = document.getElementById('btn-calib-compute');
@@ -129,13 +137,49 @@
   let pendingControls = {};
   let pendingDisplay = {};
   // --- Stream Auto-Reconnect ---
+  let isFallbackLoopRunning = false;
+  function startFrameLoopFallback() {
+    if (isFallbackLoopRunning) return;
+    isFallbackLoopRunning = true;
+    let busy = false;
+    async function step() {
+      if (!busy) {
+        busy = true;
+        try {
+          const res = await fetch('/api/frame.jpg?t=' + Date.now());
+          if (res.ok) {
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const oldUrl = streamImg.src;
+            streamImg.src = url;
+            if (oldUrl && oldUrl.startsWith('blob:')) {
+              setTimeout(() => URL.revokeObjectURL(oldUrl), 800);
+            }
+          }
+        } catch (e) {}
+        busy = false;
+      }
+      requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  }
+
   function reloadStream() {
     if (!streamImg) return;
     streamImg.src = '/stream.mjpg?t=' + Date.now();
   }
+
+  // If native MJPEG doesn't paint within 1.2s, auto-switch to frame loop
+  setTimeout(() => {
+    if (streamImg && (streamImg.naturalWidth === 0 || !streamImg.complete)) {
+      console.warn('Native MJPEG stream not painting, switching to frame loop fallback');
+      startFrameLoopFallback();
+    }
+  }, 1200);
+
   if (streamImg) {
     streamImg.onerror = () => {
-      setTimeout(reloadStream, 600);
+      startFrameLoopFallback();
     };
   }
 
@@ -392,6 +436,49 @@
       showToast(`Applied ${targetExp / 1000}ms shutter @ ${targetGain}× gain`);
     });
   }
+
+  // --- Pitch Auto-Clip Handlers ---
+  function updatePitchConfig() {
+    if (!chkPitchAutoClip) return;
+    const cfg = {
+      enabled: chkPitchAutoClip.checked,
+      min_motion_pixels: 800,
+      pre_roll_sec: parseFloat(selectPitchPreroll.value) || 1.5,
+      post_roll_sec: parseFloat(selectPitchPostroll.value) || 1.5,
+      cooldown_sec: 3.0
+    };
+    fetch('/api/pitch/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg)
+    }).catch(console.error);
+    showToast(`Pitch Auto-Clip: ${cfg.enabled ? 'ON' : 'OFF'}`);
+  }
+
+  if (chkPitchAutoClip) chkPitchAutoClip.addEventListener('change', updatePitchConfig);
+  if (selectPitchPreroll) selectPitchPreroll.addEventListener('change', updatePitchConfig);
+  if (selectPitchPostroll) selectPitchPostroll.addEventListener('change', updatePitchConfig);
+
+  setInterval(() => {
+    if (!chkPitchAutoClip || !chkPitchAutoClip.checked) return;
+    fetch('/api/pitch/status')
+      .then(r => r.json())
+      .then(d => {
+        if (valPitchMotion) valPitchMotion.textContent = `${d.motion_level} %`;
+        if (pitchMotionFill) pitchMotionFill.style.width = `${Math.min(100, d.motion_level)}%`;
+        if (valPitchClipsCount) valPitchClipsCount.textContent = d.total_clips;
+        if (pitchClipStatusBadge) {
+          if (d.is_clipping) {
+            pitchClipStatusBadge.textContent = '● 클립 녹화 중 (CLIPPING)';
+            pitchClipStatusBadge.className = 'pill pill-danger';
+          } else {
+            pitchClipStatusBadge.textContent = '대기 중 (IDLE)';
+            pitchClipStatusBadge.className = 'pill pill-muted';
+          }
+        }
+      })
+      .catch(() => {});
+  }, 250);
 
   // --- Telemetry Drawing (Sparkline & Histogram) ---
   function drawSparkline(val) {

@@ -10,6 +10,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <deque>
 #include <vector>
 #include <nlohmann/json.hpp>
 #include <opencv2/opencv.hpp>
@@ -37,6 +38,22 @@ struct DisplayMetrics {
     double focus_score_max = 0.0;
     uint32_t active_viewers = 0;
     std::vector<uint32_t> histogram_64; // 64 bins of luma distribution
+};
+struct PitchDetectConfig {
+    bool enabled = false;
+    int motion_threshold = 25;       // Pixel difference threshold (0-255)
+    int min_motion_pixels = 800;     // Min changed pixels to trigger pitch (sensitivity)
+    float pre_roll_sec = 1.5f;       // Seconds of buffer before pitch release
+    float post_roll_sec = 1.5f;      // Seconds of buffer after pitch motion
+    float cooldown_sec = 3.0f;       // Cooldown between detections
+};
+
+struct PitchDetectStatus {
+    bool enabled = false;
+    bool is_clipping = false;
+    int current_motion_level = 0;    // 0 - 100%
+    uint64_t total_clips = 0;
+    std::string last_clip_path;
 };
 
 class DisplayPipeline {
@@ -73,6 +90,11 @@ public:
     nlohmann::json get_calibration() const;
     void clear_calibration_frames();
     int get_calibration_frame_count() const;
+
+    // Pitch Detection & Auto-Clipping
+    void update_pitch_config(const PitchDetectConfig& cfg);
+    PitchDetectConfig get_pitch_config() const;
+    PitchDetectStatus get_pitch_status() const;
 
 
 private:
@@ -117,6 +139,16 @@ private:
     bool calib_capture_done_{false};
     bool calib_corners_found_last_{false};
     std::condition_variable calib_cv_;
+
+    // Pitch Motion Detection & Auto-Clipping
+    mutable std::mutex pitch_mu_;
+    PitchDetectConfig pitch_config_;
+    PitchDetectStatus pitch_status_;
+    std::deque<cv::Mat> pre_roll_buffer_;
+    cv::Mat prev_detect_gray_;
+    cv::VideoWriter pitch_clip_writer_;
+    int post_roll_remaining_{0};
+    uint64_t last_pitch_trigger_time_ns_{0};
 
     void run();
 };
