@@ -28,6 +28,9 @@ struct DisplaySettings {
     bool zebra_stripes = false;
     int zebra_threshold = 95;            // 70 .. 100 (% of 255)
     std::string grid_mode = "none";      // "none", "rule_of_thirds", "crosshair"
+    bool false_color = false;            // SmallHD / Blackmagic False Color exposure assist
+    float contrast = 1.0f;               // 0.5 .. 2.0
+    float saturation = 1.0f;             // 0.0 .. 2.0
     int jpeg_quality = 75;               // 30 .. 95
     int fps_limit = 30;                  // 10 .. 60
 };

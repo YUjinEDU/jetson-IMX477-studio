@@ -80,6 +80,18 @@
   const selectViewFps = document.getElementById('select-view-fps');
   const btnFullscreen = document.getElementById('btn-fullscreen');
 
+  const chkFalseColor = document.getElementById('chk-false-color');
+  const metricCpuTemp = document.getElementById('metric-cpu-temp');
+  const metricRamUsed = document.getElementById('metric-ram-used');
+
+  // Instant Replay Elements
+  const replayModal = document.getElementById('replay-modal');
+  const replayVideo = document.getElementById('replay-video');
+  const replayModalTitle = document.getElementById('replay-modal-title');
+  const btnCloseReplay = document.getElementById('btn-close-replay');
+  const btnStepPrev = document.getElementById('btn-step-prev');
+  const btnStepNext = document.getElementById('btn-step-next');
+
   // Presets & Media
   const presetSelect = document.getElementById('preset-select');
   const btnLoadPreset = document.getElementById('btn-load-preset');
@@ -682,6 +694,10 @@
           if (valActualCct && cm.actual_cct) valActualCct.textContent = cm.actual_cct + ' K';
           drawSparkline(cm.sensor_fps || 0);
         }
+        if (d.system_metrics) {
+          if (metricCpuTemp) metricCpuTemp.textContent = `${d.system_metrics.cpu_temp_c.toFixed(1)}°C`;
+          if (metricRamUsed) metricRamUsed.textContent = `${(d.system_metrics.ram_used_mb / 1024).toFixed(1)} GB`;
+        }
 
         if (dm) {
           if (hudFps) hudFps.textContent = (dm.display_fps || 0).toFixed(0) + ' FPS VIEW';
@@ -761,15 +777,22 @@
         card.className = 'gallery-card';
         const isVid = item.type === 'video';
         card.innerHTML = `
-          <a href="${item.url}" target="_blank">
-            ${isVid ? `<div style="height:90px;background:#0f172a;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;">▶ VIDEO</div>` : `<img src="${item.url}" alt="${item.filename}" loading="lazy">`}
+          <a href="${item.url}" class="${isVid ? 'replay-link' : ''}" data-url="${item.url}" data-name="${item.filename}" ${isVid ? '' : 'target="_blank"'}>
+            ${isVid ? `<div style="height:90px;background:#0f172a;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;cursor:pointer;">▶ SLOW-MO REPLAY</div>` : `<img src="${item.url}" alt="${item.filename}" loading="lazy">`}
           </a>
           <div class="gallery-meta">
-            <span>${item.filename.length > 20 ? item.filename.substring(0, 18) + '..' : item.filename}</span>
+            <span class="${isVid ? 'replay-link' : ''}" data-url="${item.url}" data-name="${item.filename}" style="${isVid ? 'cursor:pointer;color:var(--accent);font-weight:700;' : ''}">${item.filename.length > 20 ? item.filename.substring(0, 18) + '..' : item.filename}</span>
             <a href="${item.url}" download style="color:var(--accent);text-decoration:none;font-weight:700;">Save</a>
           </div>
         `;
         galleryContainer.appendChild(card);
+      });
+
+      document.querySelectorAll('.replay-link').forEach(link => {
+        link.addEventListener('click', (e) => {
+          e.preventDefault();
+          openReplayModal(link.dataset.url, link.dataset.name);
+        });
       });
     }).catch(console.error);
   }
@@ -832,6 +855,62 @@
     });
   }
 
+  // --- Instant Slow-Motion Replay Handlers ---
+  function openReplayModal(url, title) {
+    if (!replayModal || !replayVideo) return;
+    if (replayModalTitle) replayModalTitle.textContent = `⚾ ${title || 'Instant Replay'}`;
+    replayVideo.src = url;
+    replayVideo.playbackRate = 0.25; // default slow-motion
+    replayModal.style.display = 'flex';
+    replayVideo.play().catch(() => {});
+    document.querySelectorAll('.btn-speed').forEach(b => b.classList.toggle('active', b.dataset.speed === '0.25'));
+  }
+
+  if (btnCloseReplay) {
+    btnCloseReplay.addEventListener('click', () => {
+      replayVideo.pause();
+      replayVideo.src = '';
+      replayModal.style.display = 'none';
+    });
+  }
+
+  if (replayModal) {
+    replayModal.addEventListener('click', (e) => {
+      if (e.target === replayModal) {
+        replayVideo.pause();
+        replayVideo.src = '';
+        replayModal.style.display = 'none';
+      }
+    });
+  }
+
+  document.querySelectorAll('.btn-speed').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.btn-speed').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const rate = parseFloat(btn.dataset.speed);
+      if (replayVideo) replayVideo.playbackRate = rate;
+      showToast(`Replay Speed: ${rate}×`);
+    });
+  });
+
+  if (btnStepPrev) {
+    btnStepPrev.addEventListener('click', () => {
+      if (replayVideo) {
+        replayVideo.pause();
+        replayVideo.currentTime = Math.max(0, replayVideo.currentTime - (1.0 / 30.0));
+      }
+    });
+  }
+  if (btnStepNext) {
+    btnStepNext.addEventListener('click', () => {
+      if (replayVideo) {
+        replayVideo.pause();
+        replayVideo.currentTime = Math.min(replayVideo.duration, replayVideo.currentTime + (1.0 / 30.0));
+      }
+    });
+  }
+
   // --- Zoom & Minimap Handlers ---
   zoomBtns.forEach(btn => {
     btn.addEventListener('click', () => {
@@ -854,6 +933,12 @@
   }
   if (selectGrid) {
     selectGrid.addEventListener('change', () => postDisplay({ grid_mode: selectGrid.value }));
+  }
+  if (chkFalseColor) {
+    chkFalseColor.addEventListener('change', () => {
+      postDisplay({ false_color: chkFalseColor.checked });
+      showToast(`False Color: ${chkFalseColor.checked ? 'ON' : 'OFF'}`);
+    });
   }
   if (selectViewFps) {
     selectViewFps.addEventListener('change', () => postDisplay({ fps_limit: parseInt(selectViewFps.value, 10) }));

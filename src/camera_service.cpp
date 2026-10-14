@@ -208,7 +208,7 @@ bool CameraService::start(int ai_width, const std::string& shm_name, int sensor_
     impl_->main_consumer.reset(FrameConsumer::create(impl_->main_stream.get()));
 
     // AI stream (if enabled)
-    if (impl_->ai_width > 0) {
+    if (impl_->ai_width > 0 && sensor_mode == 2) {
         UniqueObj<OutputStreamSettings> ss_ai(cs->createOutputStreamSettings(STREAM_TYPE_EGL));
         auto es_ai = interface_cast<IEGLOutputStreamSettings>(ss_ai);
         es_ai->setPixelFormat(PIXEL_FMT_YCbCr_420_888);
@@ -248,14 +248,34 @@ bool CameraService::start(int ai_width, const std::string& shm_name, int sensor_
         if (egl_ai->waitUntilConnected(5000000000ULL) != STATUS_OK) return false;
     }
 
-    // Warmup 30 frames
+    // Warmup frames and verify valid frame acquisition
     auto mfc = interface_cast<IFrameConsumer>(impl_->main_consumer);
     auto afc = impl_->ai_consumer ? interface_cast<IFrameConsumer>(impl_->ai_consumer) : nullptr;
-    for (int i = 0; i < 30; ++i) {
+    bool got_warmup_frame = false;
+    for (int i = 0; i < 15; ++i) {
         UniqueObj<Frame> f1(mfc->acquireFrame(2000000000ULL));
+        if (f1) got_warmup_frame = true;
         if (afc) { UniqueObj<Frame> f2(afc->acquireFrame(2000000000ULL)); }
     }
+    if (!got_warmup_frame) {
+        fprintf(stderr, "[ERROR] CameraService warmup failed for mode %d: no valid frames!\n", sensor_mode);
+        stop();
+        return false;
+    }
 
+    // Reset per-session metrics and timestamps for the new mode
+    {
+        std::lock_guard<std::mutex> mlock(impl_->metrics_mu);
+        impl_->first_ts = 0;
+        impl_->first_host = 0;
+        impl_->prev_ts = 0;
+        impl_->prev_num = 0;
+        impl_->metrics.total_frames = 0;
+        impl_->metrics.bad_sensor_intervals = 0;
+        impl_->metrics.sequence_gaps = 0;
+        impl_->metrics.sensor_fps = 0.0;
+        impl_->metrics.host_fps = 0.0;
+    }
     // 2. Initialize Shared Memory (if AI stream enabled)
     if (impl_->ai_width > 0) {
         shm_unlink(impl_->shm_name_str.c_str());

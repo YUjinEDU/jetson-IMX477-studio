@@ -326,6 +326,25 @@ void DisplayPipeline::run() {
             }
         }
 
+        // False Color Exposure Assist
+        if (s.false_color) {
+            for (int r = 0; r < bgr.rows; ++r) {
+                cv::Vec3b* row = bgr.ptr<cv::Vec3b>(r);
+                const uint8_t* g_row = gray.ptr<uint8_t>(r);
+                for (int c = 0; c < bgr.cols; ++c) {
+                    uint8_t y = g_row[c];
+                    if (y >= 250) row[c] = cv::Vec3b(0, 0, 255);       // Red: 98-100% Clipped highlight
+                    else if (y >= 230) row[c] = cv::Vec3b(0, 140, 255); // Orange: 90-98% Bright highlight
+                    else if (y >= 170 && y <= 195) row[c] = cv::Vec3b(180, 105, 255); // Pink: Skin highlight
+                    else if (y >= 125 && y <= 155) row[c] = cv::Vec3b(0, 255, 0);     // Green: 18% Gray & Midtone
+                    else if (y >= 100 && y <= 120) row[c] = cv::Vec3b(128, 128, 128); // Gray: 40-48% Neutral
+                    else if (y <= 20) row[c] = cv::Vec3b(180, 0, 180); // Purple: 0-8% Crushed shadow
+                    else if (y <= 45) row[c] = cv::Vec3b(220, 50, 0);  // Blue: 8-18% Deep shadow
+                    else row[c] = cv::Vec3b(y, y, y);                  // Monochrome baseline
+                }
+            }
+        }
+
         // 6. Overlays: Grid / Crosshair
         // 6. Overlays: Grid / Splits / Crosshair / Safe Area
         if (s.grid_mode == "crosshair") {
@@ -357,8 +376,36 @@ void DisplayPipeline::run() {
             cv::rectangle(bgr, cv::Rect(mx, my, bgr.cols - 2 * mx, bgr.rows - 2 * my), cv::Scalar(160, 160, 160), 1);
             cv::line(bgr, cv::Point(bgr.cols / 2 - 12, bgr.rows / 2), cv::Point(bgr.cols / 2 + 12, bgr.rows / 2), cv::Scalar(160, 160, 160), 1);
             cv::line(bgr, cv::Point(bgr.cols / 2, bgr.rows / 2 - 12), cv::Point(bgr.cols / 2, bgr.rows / 2 + 12), cv::Scalar(160, 160, 160), 1);
+        } else if (s.grid_mode == "frame_16_9") {
+            int fh = (int)(bgr.cols * 9.0 / 16.0);
+            if (fh < bgr.rows) {
+                int pad = (bgr.rows - fh) / 2;
+                cv::line(bgr, cv::Point(0, pad), cv::Point(bgr.cols, pad), cv::Scalar(0, 255, 255), 1);
+                cv::line(bgr, cv::Point(0, bgr.rows - pad), cv::Point(bgr.cols, bgr.rows - pad), cv::Scalar(0, 255, 255), 1);
+            }
+        } else if (s.grid_mode == "frame_239_1") {
+            int fh = (int)(bgr.cols / 2.39);
+            if (fh < bgr.rows) {
+                int pad = (bgr.rows - fh) / 2;
+                cv::Mat top_bar = bgr(cv::Rect(0, 0, bgr.cols, pad));
+                top_bar *= 0.3;
+                cv::Mat bot_bar = bgr(cv::Rect(0, bgr.rows - pad, bgr.cols, pad));
+                bot_bar *= 0.3;
+                cv::line(bgr, cv::Point(0, pad), cv::Point(bgr.cols, pad), cv::Scalar(200, 200, 200), 1);
+                cv::line(bgr, cv::Point(0, bgr.rows - pad), cv::Point(bgr.cols, bgr.rows - pad), cv::Scalar(200, 200, 200), 1);
+            }
+        } else if (s.grid_mode == "frame_9_16") {
+            int fw = (int)(bgr.rows * 9.0 / 16.0);
+            if (fw < bgr.cols) {
+                int pad = (bgr.cols - fw) / 2;
+                cv::Mat l_bar = bgr(cv::Rect(0, 0, pad, bgr.rows));
+                l_bar *= 0.3;
+                cv::Mat r_bar = bgr(cv::Rect(bgr.cols - pad, 0, pad, bgr.rows));
+                r_bar *= 0.3;
+                cv::line(bgr, cv::Point(pad, 0), cv::Point(pad, bgr.rows), cv::Scalar(200, 200, 200), 1);
+                cv::line(bgr, cv::Point(bgr.cols - pad, 0), cv::Point(bgr.cols - pad, bgr.rows), cv::Scalar(200, 200, 200), 1);
+            }
         }
-
         // Video recording frame write
         if (is_recording_.load()) {
             std::lock_guard<std::mutex> rlock(record_mu_);
@@ -659,7 +706,13 @@ void DisplayPipeline::update_pitch_config(const PitchDetectConfig& cfg) {
     pitch_config_ = cfg;
     pitch_status_.enabled = cfg.enabled;
     if (!cfg.enabled) {
-        pitch_status_.is_clipping = false;
+        if (pitch_status_.is_clipping) {
+            std::lock_guard<std::mutex> qlock(clip_queue_mu_);
+            clip_queue_.push(cv::Mat()); // Finalize in-flight clip gracefully
+            clip_queue_cv_.notify_one();
+            pitch_status_.is_clipping = false;
+            post_roll_remaining_ = -1;
+        }
         pre_roll_buffer_.clear();
         prev_detect_gray_.release();
     }

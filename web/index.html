@@ -31,6 +31,8 @@
       <div class="ticker-item"><span class="ticker-k">DROP</span> <span class="ticker-v success" id="metric-gaps">0</span></div>
       <div class="ticker-item"><span class="ticker-k">TOTAL</span> <span class="ticker-v" id="metric-total-frames">0</span></div>
       <div class="ticker-item"><span class="ticker-k">UPTIME</span> <span class="ticker-v" id="metric-uptime">00:00</span></div>
+      <div class="ticker-item"><span class="ticker-k">TEMP</span> <span class="ticker-v" id="metric-cpu-temp">--&deg;C</span></div>
+      <div class="ticker-item"><span class="ticker-k">RAM</span> <span class="ticker-v" id="metric-ram-used">-- GB</span></div>
     </div>
 
     <!-- Right Global Actions -->
@@ -429,6 +431,9 @@
               <option value="quad">2&times;2 (4분할선)</option>
               <option value="center_split_v">좌우 수직 2분할</option>
               <option value="center_split_h">상하 수평 2분할</option>
+              <option value="frame_16_9">16:9 와이드 가이드</option>
+              <option value="frame_239_1">2.39:1 시네마스코프 (레터박스)</option>
+              <option value="frame_9_16">9:16 세로 숏폼/릴스 크롭</option>
               <option value="crosshair">정밀 십자선 (+)</option>
               <option value="safe_area">방송용 안전영역 (Safe 90%)</option>
             </select>
@@ -446,6 +451,9 @@
             </select>
             <label class="studio-check" title="빛이 번져 하얗게 날아간 영역 줄무늬 경고">
               <input type="checkbox" id="chk-zebra"> 제브라 (ZEBRA)
+            </label>
+            <label class="studio-check" title="스몰HD/블랙매직 가색상(False Color) 노출 보조">
+              <input type="checkbox" id="chk-false-color"> 가색상 (FALSE COLOR)
             </label>
           </div>
 
@@ -520,6 +528,32 @@
           <tr><td><kbd>M</kbd></td><td>수동 / 자동 노출 즉시 전환</td></tr>
           <tr><td><kbd>?</kbd></td><td>단축키 도움말 팝업</td></tr>
         </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Instant Slow-Motion Replay Modal -->
+  <div id="replay-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-dialog" style="width: 720px; max-width: 95vw;">
+      <div class="modal-head">
+        <h4 id="replay-modal-title">⚾ 투구 인스턴트 슬로우모션 리플레이</h4>
+        <button id="btn-close-replay" class="btn-close">&times;</button>
+      </div>
+      <div class="modal-content" style="padding: 10px; background: #080c14;">
+        <video id="replay-video" style="width: 100%; border-radius: 4px; display: block;" controls playsinline></video>
+        <div class="row-between" style="margin-top: 10px; padding: 0 4px;">
+          <div class="seg-group seg-xs">
+            <span class="strip-label" style="align-self: center; margin-right: 4px; color: #94a3b8;">배속:</span>
+            <button class="seg-btn btn-speed" data-speed="1.0">1.0&times;</button>
+            <button class="seg-btn btn-speed" data-speed="0.5">0.5&times;</button>
+            <button class="seg-btn btn-speed active" data-speed="0.25">0.25&times; (슬로우)</button>
+            <button class="seg-btn btn-speed" data-speed="0.1">0.1&times; (초슬로우)</button>
+          </div>
+          <div style="display: flex; gap: 6px;">
+            <button id="btn-step-prev" class="btn btn-ghost btn-xs" style="color:#fff; border-color:#334155;">◀ 1프레임</button>
+            <button id="btn-step-next" class="btn btn-ghost btn-xs" style="color:#fff; border-color:#334155;">1프레임 ▶</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>

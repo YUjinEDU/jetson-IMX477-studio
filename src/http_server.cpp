@@ -10,6 +10,30 @@
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <chrono>
+#include <fstream>
+
+static float get_cpu_temp_c() {
+    std::ifstream f("/sys/devices/virtual/thermal/thermal_zone0/temp");
+    if (f) {
+        long t = 0;
+        if (f >> t) return (float)t / 1000.0f;
+    }
+    return 0.0f;
+}
+
+static uint64_t get_ram_used_mb() {
+    std::ifstream f("/proc/meminfo");
+    if (f) {
+        std::string line;
+        uint64_t total = 0, avail = 0;
+        while (std::getline(f, line)) {
+            if (line.rfind("MemTotal:", 0) == 0) sscanf(line.c_str(), "MemTotal: %lu", &total);
+            else if (line.rfind("MemAvailable:", 0) == 0) sscanf(line.c_str(), "MemAvailable: %lu", &avail);
+        }
+        if (total > avail) return (total - avail) / 1024;
+    }
+    return 0;
+}
 
 using json = nlohmann::json;
 
@@ -171,7 +195,8 @@ bool HttpServer::start() {
                         {"zebra_threshold", ds.zebra_threshold},
                         {"grid_mode", ds.grid_mode},
                         {"jpeg_quality", ds.jpeg_quality},
-                        {"fps_limit", ds.fps_limit}
+                        {"fps_limit", ds.fps_limit},
+                        {"false_color", ds.false_color},
                     }},
                     {"capabilities", {
                         {"width", caps.width},
@@ -182,6 +207,10 @@ bool HttpServer::start() {
                         {"min_gain", caps.min_gain},
                         {"max_gain", caps.max_gain},
                         {"active_sensor_mode", caps.active_sensor_mode}
+                    }},
+                    {"system_metrics", {
+                        {"cpu_temp_c", get_cpu_temp_c()},
+                        {"ram_used_mb", get_ram_used_mb()}
                     }}
                 };
 
@@ -229,7 +258,8 @@ bool HttpServer::start() {
                 {"zebra_threshold", ds.zebra_threshold},
                 {"grid_mode", ds.grid_mode},
                 {"jpeg_quality", ds.jpeg_quality},
-                {"fps_limit", ds.fps_limit}
+                {"fps_limit", ds.fps_limit},
+                {"false_color", ds.false_color},
             }},
             {"capabilities", {
                 {"width", caps.width},
@@ -352,6 +382,7 @@ bool HttpServer::start() {
             if (j.contains("grid_mode")) ds.grid_mode = j["grid_mode"].get<std::string>();
             if (j.contains("jpeg_quality")) ds.jpeg_quality = j["jpeg_quality"].get<int>();
             if (j.contains("fps_limit")) ds.fps_limit = j["fps_limit"].get<int>();
+            if (j.contains("false_color")) ds.false_color = j["false_color"].get<bool>();
 
             impl_->display.update_settings(ds);
             res.set_content("{\"status\":\"ok\"}", "application/json");
