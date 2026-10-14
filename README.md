@@ -125,6 +125,11 @@ http://<jetson-ip>:8477
   are resized before RGB conversion; full-resolution RGB is generated only for
   snapshots. After the surface has been read, capture is rearmed while overlays
   and JPEG encoding process the independent RGB image.
+- Camera and AI buffers are **NV12 (U,V chroma order)**. Preview, full-resolution
+  snapshots and Python BGR output use NV12 conversion, not NV21; swapping these
+  formats produces incorrect hues, including blue skin. Existing recorded
+  media is not recolored. Auto white balance remains an ISP control; this fix
+  does not establish calibrated color accuracy or change NITO/driver settings.
 - Browsers retain native MJPEG when it has painted a frame. Single-JPEG fallback
   is decode-aware and capped at the selected preview FPS; reloading the stream
   cancels the old fallback loop.
@@ -136,6 +141,10 @@ http://<jetson-ip>:8477
   120fps sensor stream. Replay timing uses the clip's actual container FPS.
   Network/decode delays can reduce playback speed; frames are not advanced
   before they have decoded. Motion detection uses clean pre-overlay grayscale.
+  Stopping the display during a clip drains pending frames and closes its writer
+  before restarting. Old-resolution pre-roll/motion buffers and queued job
+  metadata are cleared; clip names include a monotonic timestamp suffix.
+  Disabling auto-clipping keeps the clip busy until its queued frames finalize.
 - `GET /api/clip/info?path=/recordings/<file>.avi` returns FPS, frame count,
   dimensions and duration. `GET /api/clip/frame?path=...&frame=N` returns JPEG.
   Both resolve validated files strictly beneath `recordings/`; traversal and
@@ -149,6 +158,15 @@ A 66.06s hardware soak captured 7,938 frames at 120.160fps with zero sequence
 gaps, one sensor-interval anomaly, and no API errors. Gallery clicks, all replay
 speeds, one-frame stepping, delayed rapid scrubbing and close cancellation were
 exercised in Firefox. Remote Windows playback latency was not measured.
+
+Color regression: `python3 tests/test_client.py` uses an isolated real SHM frame
+to verify red, blue and neutral-gray NV12 output through the native reader.
+With an idle studio launched from this directory, run the serial hardware
+regression `python3 tests/hardware_clip_modes.py`: it triggers a clip, immediately
+switches 1080→990 mode, triggers again, decodes every frame of both clips and
+checks the first file remains unchanged. Probe files are removed and the initial
+mode/display/pitch configuration restored. Do not run hardware regressions
+concurrently or while recording.
 
 ---
 

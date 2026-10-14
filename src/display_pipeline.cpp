@@ -103,9 +103,27 @@ void DisplayPipeline::stop() {
     frame_cv_.notify_all();
     if (worker_.joinable()) worker_.join();
 
-    clip_worker_running_.store(false);
+    // No producers remain. Drain queued frames before releasing the writer.
+    {
+        std::lock_guard<std::mutex> queue_lock(clip_queue_mu_);
+        clip_worker_running_.store(false);
+    }
     clip_queue_cv_.notify_all();
     if (clip_worker_.joinable()) clip_worker_.join();
+    {
+        std::lock_guard<std::mutex> pitch_lock(pitch_mu_);
+        std::lock_guard<std::mutex> queue_lock(clip_queue_mu_);
+        while (!clip_queue_.empty()) clip_queue_.pop();
+        active_clip_path_.clear();
+        active_clip_size_ = cv::Size();
+        pre_roll_buffer_.clear();
+        prev_detect_gray_.release();
+        post_roll_remaining_ = -1;
+        last_pitch_trigger_time_ns_ = 0;
+        current_fps_target_ = std::clamp(get_settings().fps_limit, 10, 60);
+        pitch_status_.is_clipping = false;
+        pitch_status_.current_motion_level = 0;
+    }
     {
         std::lock_guard<std::mutex> frame_lock(frame_mu_);
         latest_jpeg_.clear();
@@ -215,13 +233,14 @@ void DisplayPipeline::run() {
         cv::resize(y_plane(roi), preview_y, cv::Size(target_w, target_h), 0, 0, interpolation);
         cv::resize(uv_plane(chroma_roi), preview_uv, cv::Size(target_w / 2, target_h / 2),
                    0, 0, interpolation);
-        cv::cvtColorTwoPlane(preview_y, preview_uv, bgr, cv::COLOR_YUV2BGR_NV21);
+        // CameraService requests NVBUF_COLOR_FORMAT_NV12: chroma is U,V, not V,U.
+        cv::cvtColorTwoPlane(preview_y, preview_uv, bgr, cv::COLOR_YUV2BGR_NV12);
         // Snapshot handler on full-res frame
         {
             std::lock_guard<std::mutex> lock(snapshot_mu_);
             if (snapshot_requested_ && !snapshot_done_) {
                 cv::Mat snap_bgr;
-                cv::cvtColorTwoPlane(y_plane, uv_plane, snap_bgr, cv::COLOR_YUV2BGR_NV21);
+                cv::cvtColorTwoPlane(y_plane, uv_plane, snap_bgr, cv::COLOR_YUV2BGR_NV12);
                 std::vector<uint8_t> snap_jpg;
                 if (encode_jpeg_bgr(snap_bgr, snap_jpg, 95)) {
                     auto t = std::time(nullptr);
@@ -449,7 +468,8 @@ void DisplayPipeline::run() {
                         struct tm tm;
                         localtime_r(&t, &tm);
                         std::ostringstream ss;
-                        ss << "recordings/pitch_" << std::put_time(&tm, "%Y%m%d_%H%M%S") << ".avi";
+                        ss << "recordings/pitch_" << std::put_time(&tm, "%Y%m%d_%H%M%S")
+                           << "_" << now_ns() << ".avi";
                         std::string clip_path = ss.str();
                         pitch_status_.last_clip_path = clip_path;
 
@@ -679,11 +699,10 @@ void DisplayPipeline::update_pitch_config(const PitchDetectConfig& cfg) {
     pitch_config_ = cfg;
     pitch_status_.enabled = cfg.enabled;
     if (!cfg.enabled) {
-        if (pitch_status_.is_clipping) {
+        if (pitch_status_.is_clipping && post_roll_remaining_ >= 0) {
             std::lock_guard<std::mutex> qlock(clip_queue_mu_);
             clip_queue_.push(cv::Mat()); // Finalize in-flight clip gracefully
             clip_queue_cv_.notify_one();
-            pitch_status_.is_clipping = false;
             post_roll_remaining_ = -1;
         }
         pre_roll_buffer_.clear();
@@ -710,7 +729,7 @@ nlohmann::json DisplayPipeline::get_calibration() const {
 }
 
 void DisplayPipeline::clip_worker_loop() {
-    while (clip_worker_running_.load()) {
+    while (true) {
         std::string clip_path;
         double fps = 30.0;
         cv::Size size(960, 714);
@@ -721,7 +740,7 @@ void DisplayPipeline::clip_worker_loop() {
             clip_queue_cv_.wait(lock, [&] {
                 return !clip_queue_.empty() || !clip_worker_running_.load();
             });
-            if (!clip_worker_running_.load()) break;
+            if (clip_queue_.empty()) break; // Shutdown with nothing left to finalize
 
             clip_path = active_clip_path_;
             fps = active_clip_fps_;
@@ -734,21 +753,19 @@ void DisplayPipeline::clip_worker_loop() {
             writer.open(clip_path, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), fps, size);
         }
 
-        bool active = true;
-        while (active && clip_worker_running_.load()) {
+        while (true) {
             cv::Mat frame;
             {
                 std::unique_lock<std::mutex> lock(clip_queue_mu_);
                 clip_queue_cv_.wait(lock, [&] {
                     return !clip_queue_.empty() || !clip_worker_running_.load();
                 });
-                if (!clip_worker_running_.load()) break;
+                if (clip_queue_.empty()) break; // Shutdown after draining pending frames
                 frame = std::move(clip_queue_.front());
                 clip_queue_.pop();
             }
 
             if (frame.empty()) {
-                active = false;
                 break;
             }
 
@@ -757,10 +774,15 @@ void DisplayPipeline::clip_worker_loop() {
             }
         }
 
-        if (writer.isOpened()) {
-            writer.release();
+        bool saved = writer.isOpened();
+        if (saved) writer.release();
+        {
+            // Clear job metadata before publishing idle, so a new trigger cannot
+            // enqueue a second clip into the previous writer.
             std::lock_guard<std::mutex> plock(pitch_mu_);
-            pitch_status_.total_clips++;
+            std::lock_guard<std::mutex> qlock(clip_queue_mu_);
+            if (active_clip_path_ == clip_path) active_clip_path_.clear();
+            if (saved) pitch_status_.total_clips++;
             pitch_status_.is_clipping = false;
         }
     }
@@ -782,7 +804,7 @@ bool DisplayPipeline::trigger_pitch_clip(const std::string& custom_label) {
     localtime_r(&t, &tm);
     std::ostringstream ss;
     ss << "recordings/pitch_" << (custom_label.empty() ? "" : custom_label + "_")
-       << std::put_time(&tm, "%Y%m%d_%H%M%S") << ".avi";
+       << std::put_time(&tm, "%Y%m%d_%H%M%S") << "_" << now_ns() << ".avi";
     std::string clip_path = ss.str();
     pitch_status_.last_clip_path = clip_path;
 
