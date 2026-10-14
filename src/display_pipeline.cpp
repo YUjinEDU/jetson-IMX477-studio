@@ -91,6 +91,8 @@ bool DisplayPipeline::start() {
     std::lock_guard<std::mutex> lock(lifecycle_mu_);
     if (running_.load()) return true;
     running_.store(true);
+    clip_worker_running_.store(true);
+    clip_worker_ = std::thread(&DisplayPipeline::clip_worker_loop, this);
     worker_ = std::thread(&DisplayPipeline::run, this);
     return true;
 }
@@ -100,6 +102,10 @@ void DisplayPipeline::stop() {
     if (!running_.exchange(false)) return;
     frame_cv_.notify_all();
     if (worker_.joinable()) worker_.join();
+
+    clip_worker_running_.store(false);
+    clip_queue_cv_.notify_all();
+    if (clip_worker_.joinable()) clip_worker_.join();
 }
 
 bool DisplayPipeline::get_latest_jpeg(std::vector<uint8_t>& out_jpeg,
@@ -388,16 +394,18 @@ void DisplayPipeline::run() {
         // Pitch Motion Detection & Auto-Clipping
         {
             std::lock_guard<std::mutex> plock(pitch_mu_);
+            current_fps_target_ = fps_target;
+            size_t max_pre_roll = (size_t)std::max(10, (int)(pitch_config_.pre_roll_sec * fps_target));
+            pre_roll_buffer_.push_back(bgr.clone());
+            while (pre_roll_buffer_.size() > max_pre_roll) {
+                pre_roll_buffer_.pop_front();
+            }
+
+            // Auto Motion Detection
             if (pitch_config_.enabled) {
                 cv::Mat det_gray;
                 if (gray.empty()) cv::cvtColor(bgr, det_gray, cv::COLOR_BGR2GRAY);
                 else det_gray = gray;
-
-                size_t max_pre_roll = (size_t)std::max(5, (int)(pitch_config_.pre_roll_sec * fps_target));
-                pre_roll_buffer_.push_back(bgr.clone());
-                while (pre_roll_buffer_.size() > max_pre_roll) {
-                    pre_roll_buffer_.pop_front();
-                }
 
                 if (!prev_detect_gray_.empty() && prev_detect_gray_.size() == det_gray.size()) {
                     cv::Mat diff, thresh_mask;
@@ -414,7 +422,7 @@ void DisplayPipeline::run() {
                         (now - last_pitch_trigger_time_ns_ >= cooldown_ns)) {
                         last_pitch_trigger_time_ns_ = now;
                         pitch_status_.is_clipping = true;
-                        post_roll_remaining_ = (int)(pitch_config_.post_roll_sec * fps_target);
+                        post_roll_remaining_ = (int)std::lround(pitch_config_.post_roll_sec * fps_target);
 
                         std::error_code ec;
                         std::filesystem::create_directories("recordings", ec);
@@ -426,33 +434,43 @@ void DisplayPipeline::run() {
                         std::string clip_path = ss.str();
                         pitch_status_.last_clip_path = clip_path;
 
-                        pitch_clip_writer_.open(clip_path, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'),
-                                                30.0, cv::Size(target_w, target_h));
-                        if (pitch_clip_writer_.isOpened()) {
+                        {
+                            std::lock_guard<std::mutex> qlock(clip_queue_mu_);
+                            while (!clip_queue_.empty()) clip_queue_.pop();
+                            active_clip_path_ = clip_path;
+                            active_clip_fps_ = (double)fps_target;
+                            active_clip_size_ = cv::Size(target_w, target_h);
                             for (const auto& f : pre_roll_buffer_) {
-                                pitch_clip_writer_.write(f);
+                                clip_queue_.push(f.clone());
                             }
+                            clip_queue_cv_.notify_one();
                         }
                     }
                 }
                 prev_detect_gray_ = det_gray.clone();
-
-                if (pitch_status_.is_clipping) {
-                    if (pitch_clip_writer_.isOpened()) {
-                        pitch_clip_writer_.write(bgr);
-                    }
-                    post_roll_remaining_--;
-                    if (post_roll_remaining_ <= 0) {
-                        pitch_clip_writer_.release();
-                        pitch_status_.is_clipping = false;
-                        pitch_status_.total_clips++;
-                    }
-                }
             } else {
                 pitch_status_.current_motion_level = 0;
             }
-        }
 
+            // Feed post-roll frames to worker while clipping
+            if (pitch_status_.is_clipping) {
+                if (post_roll_remaining_ > 0) {
+                    {
+                        std::lock_guard<std::mutex> qlock(clip_queue_mu_);
+                        clip_queue_.push(bgr.clone());
+                        clip_queue_cv_.notify_one();
+                    }
+                    post_roll_remaining_--;
+                } else if (post_roll_remaining_ == 0) {
+                    {
+                        std::lock_guard<std::mutex> qlock(clip_queue_mu_);
+                        clip_queue_.push(cv::Mat()); // EOF sentinel
+                        clip_queue_cv_.notify_one();
+                    }
+                    post_roll_remaining_ = -1;
+                }
+            }
+        }
         // 7. JPEG Encode
         encoded.clear();
         encode_jpeg_bgr(bgr, encoded, std::clamp(s.jpeg_quality, 30, 95));
@@ -641,7 +659,6 @@ void DisplayPipeline::update_pitch_config(const PitchDetectConfig& cfg) {
     pitch_config_ = cfg;
     pitch_status_.enabled = cfg.enabled;
     if (!cfg.enabled) {
-        if (pitch_clip_writer_.isOpened()) pitch_clip_writer_.release();
         pitch_status_.is_clipping = false;
         pre_roll_buffer_.clear();
         prev_detect_gray_.release();
@@ -664,4 +681,99 @@ nlohmann::json DisplayPipeline::get_calibration() const {
         return {{"status", "uncalibrated"}, {"frame_count", calib_corners_all_.size()}};
     }
     return current_calibration_;
+}
+
+void DisplayPipeline::clip_worker_loop() {
+    while (clip_worker_running_.load()) {
+        std::string clip_path;
+        double fps = 30.0;
+        cv::Size size(960, 714);
+        cv::VideoWriter writer;
+
+        {
+            std::unique_lock<std::mutex> lock(clip_queue_mu_);
+            clip_queue_cv_.wait(lock, [&] {
+                return !clip_queue_.empty() || !clip_worker_running_.load();
+            });
+            if (!clip_worker_running_.load()) break;
+
+            clip_path = active_clip_path_;
+            fps = active_clip_fps_;
+            size = active_clip_size_;
+        }
+
+        std::error_code ec;
+        std::filesystem::create_directories("recordings", ec);
+        if (!clip_path.empty()) {
+            writer.open(clip_path, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), fps, size);
+        }
+
+        bool active = true;
+        while (active && clip_worker_running_.load()) {
+            cv::Mat frame;
+            {
+                std::unique_lock<std::mutex> lock(clip_queue_mu_);
+                clip_queue_cv_.wait(lock, [&] {
+                    return !clip_queue_.empty() || !clip_worker_running_.load();
+                });
+                if (!clip_worker_running_.load()) break;
+                frame = std::move(clip_queue_.front());
+                clip_queue_.pop();
+            }
+
+            if (frame.empty()) {
+                active = false;
+                break;
+            }
+
+            if (writer.isOpened()) {
+                writer.write(frame);
+            }
+        }
+
+        if (writer.isOpened()) {
+            writer.release();
+            std::lock_guard<std::mutex> plock(pitch_mu_);
+            pitch_status_.total_clips++;
+            pitch_status_.is_clipping = false;
+        }
+    }
+}
+
+bool DisplayPipeline::trigger_pitch_clip(const std::string& custom_label) {
+    std::lock_guard<std::mutex> lock(pitch_mu_);
+    if (!running_.load()) return false;
+    if (pitch_status_.is_clipping) return false;
+
+    int fps = current_fps_target_ > 0 ? current_fps_target_ : 30;
+    pitch_status_.is_clipping = true;
+    post_roll_remaining_ = (int)std::lround(pitch_config_.post_roll_sec * fps);
+
+    std::error_code ec;
+    std::filesystem::create_directories("recordings", ec);
+    auto t = std::time(nullptr);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    std::ostringstream ss;
+    ss << "recordings/pitch_" << (custom_label.empty() ? "" : custom_label + "_")
+       << std::put_time(&tm, "%Y%m%d_%H%M%S") << ".avi";
+    std::string clip_path = ss.str();
+    pitch_status_.last_clip_path = clip_path;
+
+    auto caps = camera_.get_capabilities();
+    int target_w = 960;
+    int target_h = (int)std::lround(960.0 * caps.height / caps.width) & ~1;
+
+    {
+        std::lock_guard<std::mutex> qlock(clip_queue_mu_);
+        while (!clip_queue_.empty()) clip_queue_.pop();
+        active_clip_path_ = clip_path;
+        active_clip_fps_ = (double)fps;
+        active_clip_size_ = cv::Size(target_w, target_h);
+        for (const auto& f : pre_roll_buffer_) {
+            clip_queue_.push(f.clone());
+        }
+        clip_queue_cv_.notify_one();
+    }
+    return true;
 }

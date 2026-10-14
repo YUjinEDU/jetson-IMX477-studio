@@ -11,6 +11,7 @@
 #include <string>
 #include <thread>
 #include <deque>
+#include <queue>
 #include <vector>
 #include <nlohmann/json.hpp>
 #include <opencv2/opencv.hpp>
@@ -95,6 +96,7 @@ public:
     void update_pitch_config(const PitchDetectConfig& cfg);
     PitchDetectConfig get_pitch_config() const;
     PitchDetectStatus get_pitch_status() const;
+    bool trigger_pitch_clip(const std::string& custom_label = "");
 
 
 private:
@@ -146,9 +148,20 @@ private:
     PitchDetectStatus pitch_status_;
     std::deque<cv::Mat> pre_roll_buffer_;
     cv::Mat prev_detect_gray_;
-    cv::VideoWriter pitch_clip_writer_;
     int post_roll_remaining_{0};
     uint64_t last_pitch_trigger_time_ns_{0};
+    int current_fps_target_{30};
+
+    // Async Pitch Clip Encoding Worker
+    std::thread clip_worker_;
+    std::mutex clip_queue_mu_;
+    std::condition_variable clip_queue_cv_;
+    std::queue<cv::Mat> clip_queue_;
+    std::atomic<bool> clip_worker_running_{false};
+    std::string active_clip_path_;
+    double active_clip_fps_{30.0};
+    cv::Size active_clip_size_{960, 714};
+    void clip_worker_loop();
 
     void run();
 };

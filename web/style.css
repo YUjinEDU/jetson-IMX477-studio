@@ -696,12 +696,7 @@ body.theme-studio {
 }
 
 #overlay-canvas {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
+  display: none;
 }
 
 .shutter-flash {
@@ -840,7 +835,7 @@ body.theme-studio {
   color: var(--text-main);
 }
 
-canvas {
+.telem-item canvas {
   width: 100%;
   border-radius: var(--radius-sm);
   display: block;

@@ -543,6 +543,20 @@ bool HttpServer::start() {
         res.set_content(list.dump(), "application/json");
     });
 
+    impl_->svr.Post("/api/pitch/trigger", [this](const httplib::Request&, httplib::Response& res) {
+        if (impl_->display.trigger_pitch_clip("manual")) {
+            auto st = impl_->display.get_pitch_status();
+            json resp = {
+                {"status", "ok"},
+                {"path", st.last_clip_path}
+            };
+            res.set_content(resp.dump(), "application/json");
+        } else {
+            res.status = 409;
+            res.set_content("{\"status\":\"error\",\"error\":\"Clip trigger failed or already clipping\"}", "application/json");
+        }
+    });
+
 
     // 8. API: Presets
     impl_->svr.Get("/api/presets", [this](const httplib::Request&, httplib::Response& res) {
