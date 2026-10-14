@@ -82,11 +82,12 @@ public:
     CameraMetrics get_metrics() const;
     void update_controls(const CameraControls& c);
 
-    // Called by DisplayPipeline to get a mapped NV12 surface.
-    // Blocks up to timeout_ms waiting for the next capture frame.
-    // Returns true if new frame acquired.
+    // Acquire a mapped NV12 surface; stable until release_display_frame().
+    // Single display consumer. Release after all reads from the surface finish;
+    // this rearms capture while overlays/JPEG run on the independent RGB image.
     bool acquire_display_frame(NvBufSurface** out_surface, uint64_t* out_seq,
                                uint64_t* out_sensor_ts, int timeout_ms = 100);
+    void release_display_frame();
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

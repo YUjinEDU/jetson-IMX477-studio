@@ -106,11 +106,21 @@ void DisplayPipeline::stop() {
     clip_worker_running_.store(false);
     clip_queue_cv_.notify_all();
     if (clip_worker_.joinable()) clip_worker_.join();
+    {
+        std::lock_guard<std::mutex> frame_lock(frame_mu_);
+        latest_jpeg_.clear();
+        latest_seq_ = 0;
+    }
+    {
+        std::lock_guard<std::mutex> metrics_lock(metrics_mu_);
+        metrics_.display_fps = 0;
+    }
 }
 
 bool DisplayPipeline::get_latest_jpeg(std::vector<uint8_t>& out_jpeg,
                                       uint64_t& in_out_seq, int timeout_ms) {
     std::unique_lock<std::mutex> lock(frame_mu_);
+    if (!running_.load()) return false;
     if (in_out_seq == 0 && latest_seq_ > 0 && !latest_jpeg_.empty()) {
         out_jpeg = latest_jpeg_;
         in_out_seq = latest_seq_;
@@ -129,12 +139,11 @@ bool DisplayPipeline::get_latest_jpeg(std::vector<uint8_t>& out_jpeg,
 
 void DisplayPipeline::run() {
     uint64_t next_frame_time = now_ns();
-    std::vector<double> fps_history;
     uint64_t fps_window_start = now_ns();
     int frames_in_window = 0;
 
     const int target_w = 960;
-    cv::Mat bgr, final_view;
+    cv::Mat bgr, gray, preview_y, preview_uv, lap;
     std::vector<uint8_t> encoded;
 
     while (running_.load()) {
@@ -159,6 +168,7 @@ void DisplayPipeline::run() {
         if (!camera_.acquire_display_frame(&surface, &seq, &sensor_ts, 150)) {
             continue;
         }
+        bool surface_released = false;
         try {
         uint64_t t0 = now_ns();
         const auto& p = surface->surfaceList[0];
@@ -168,14 +178,14 @@ void DisplayPipeline::run() {
 
         if (!p.mappedAddr.addr[0] || !p.mappedAddr.addr[1]) {
             fprintf(stderr, "[DBG] Null mappedAddr!\n");
+            camera_.release_display_frame();
             continue;
         }
 
         cv::Mat y_plane(src_h, src_w, CV_8UC1, (void*)p.mappedAddr.addr[0], p.planeParams.pitch[0]);
         int cx = src_w / 2, cy = src_h / 2;
         cv::Rect focus_roi_rect(cx - 120, cy - 120, 240, 240);
-        cv::Mat focus_roi = y_plane(focus_roi_rect).clone();
-        cv::Mat lap;
+        cv::Mat focus_roi = y_plane(focus_roi_rect);
         cv::Laplacian(focus_roi, lap, CV_16S, 3);
         cv::Scalar mean, stddev;
         cv::meanStdDev(lap, mean, stddev);
@@ -188,65 +198,30 @@ void DisplayPipeline::run() {
             }
         }
 
-        // 3. Zoom / Crop ROI & Color Conversion
-        const uint8_t* y_data = static_cast<const uint8_t*>(p.mappedAddr.addr[0]);
-        uint32_t y_pitch = p.planeParams.pitch[0];
-        const uint8_t* uv_data = static_cast<const uint8_t*>(p.mappedAddr.addr[1]);
-        uint32_t uv_pitch = p.planeParams.pitch[1];
-        cv::Mat full_bgr;
-
+        // Scale the pitched Y/chroma planes before color conversion. Preview
+        // work stays at 960px even in 4K; full-resolution RGB is snapshot-only.
+        cv::Mat uv_plane(src_h / 2, src_w / 2, CV_8UC2,
+                         p.mappedAddr.addr[1], p.planeParams.pitch[1]);
+        cv::Rect roi(0, 0, src_w, src_h);
         if (s.zoom_mode == "1x" || s.zoom_mode == "2x" || s.zoom_mode == "4x") {
             int crop_w = ((s.zoom_mode == "1x") ? target_w : src_w / (s.zoom_mode == "4x" ? 4 : 2)) & ~1;
             int crop_h = ((s.zoom_mode == "1x") ? target_h : src_h / (s.zoom_mode == "4x" ? 4 : 2)) & ~1;
             int rx = std::clamp((int)(s.center_x * src_w) - crop_w / 2, 0, (int)src_w - crop_w) & ~1;
             int ry = std::clamp((int)(s.center_y * src_h) - crop_h / 2, 0, (int)src_h - crop_h) & ~1;
-
-            cv::Mat crop_yuv(crop_h * 3 / 2, crop_w, CV_8UC1);
-            for (int r = 0; r < crop_h; ++r) {
-                memcpy(crop_yuv.data + (size_t)r * crop_w, y_data + (size_t)(ry + r) * y_pitch + rx, crop_w);
-            }
-            size_t uv_off = (size_t)crop_w * crop_h;
-            for (int r = 0; r < crop_h / 2; ++r) {
-                memcpy(crop_yuv.data + uv_off + (size_t)r * crop_w, uv_data + (size_t)(ry / 2 + r) * uv_pitch + rx, crop_w);
-            }
-            cv::Mat crop_bgr;
-            cv::cvtColor(crop_yuv, crop_bgr, cv::COLOR_YUV2BGR_NV21);
-            if (s.zoom_mode == "2x" || s.zoom_mode == "4x") {
-                cv::resize(crop_bgr, bgr, cv::Size(target_w, target_h), 0, 0, cv::INTER_NEAREST);
-            } else {
-                bgr = crop_bgr;
-            }
-        } else {
-            // "fit": full-res pack and resize
-            cv::Mat yuv(src_h * 3 / 2, src_w, CV_8UC1);
-            for (int r = 0; r < (int)src_h; ++r) {
-                memcpy(yuv.data + (size_t)r * src_w, y_data + (size_t)r * y_pitch, src_w);
-            }
-            size_t uv_off = (size_t)src_w * src_h;
-            for (int r = 0; r < (int)src_h / 2; ++r) {
-                memcpy(yuv.data + uv_off + (size_t)r * src_w, uv_data + (size_t)r * uv_pitch, src_w);
-            }
-            cv::cvtColor(yuv, full_bgr, cv::COLOR_YUV2BGR_NV21);
-            cv::resize(full_bgr, bgr, cv::Size(target_w, target_h), 0, 0, cv::INTER_AREA);
+            roi = cv::Rect(rx, ry, crop_w, crop_h);
         }
+        cv::Rect chroma_roi(roi.x / 2, roi.y / 2, roi.width / 2, roi.height / 2);
+        int interpolation = s.zoom_mode == "fit" ? cv::INTER_AREA : cv::INTER_NEAREST;
+        cv::resize(y_plane(roi), preview_y, cv::Size(target_w, target_h), 0, 0, interpolation);
+        cv::resize(uv_plane(chroma_roi), preview_uv, cv::Size(target_w / 2, target_h / 2),
+                   0, 0, interpolation);
+        cv::cvtColorTwoPlane(preview_y, preview_uv, bgr, cv::COLOR_YUV2BGR_NV21);
         // Snapshot handler on full-res frame
         {
             std::lock_guard<std::mutex> lock(snapshot_mu_);
             if (snapshot_requested_ && !snapshot_done_) {
                 cv::Mat snap_bgr;
-                if (s.zoom_mode == "fit") {
-                    snap_bgr = full_bgr;
-                } else {
-                    cv::Mat full_yuv(src_h * 3 / 2, src_w, CV_8UC1);
-                    for (int r = 0; r < (int)src_h; ++r) {
-                        memcpy(full_yuv.data + (size_t)r * src_w, y_data + (size_t)r * y_pitch, src_w);
-                    }
-                    size_t uv_off = (size_t)src_w * src_h;
-                    for (int r = 0; r < (int)src_h / 2; ++r) {
-                        memcpy(full_yuv.data + uv_off + (size_t)r * src_w, uv_data + (size_t)r * uv_pitch, src_w);
-                    }
-                    cv::cvtColor(full_yuv, snap_bgr, cv::COLOR_YUV2BGR_NV21);
-                }
+                cv::cvtColorTwoPlane(y_plane, uv_plane, snap_bgr, cv::COLOR_YUV2BGR_NV21);
                 std::vector<uint8_t> snap_jpg;
                 if (encode_jpeg_bgr(snap_bgr, snap_jpg, 95)) {
                     auto t = std::time(nullptr);
@@ -285,11 +260,13 @@ void DisplayPipeline::run() {
                 snapshot_cv_.notify_all();
             }
         }
+        // Rearm the next capture before overlays/JPEG. At a 30fps sensor,
+        // waiting until the next display iteration otherwise misses a frame.
+        camera_.release_display_frame();
+        surface_released = true;
 
 
-        // Grayscale conversion shared by Peaking and Zebra
-        // Clean grayscale conversion before ANY overlays
-        cv::Mat gray;
+        // Clean grayscale shared by exposure assists and motion detection.
         cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
 
         // 4. Overlays: Focus Peaking
@@ -521,7 +498,7 @@ void DisplayPipeline::run() {
         // 8. Publish Frame
         {
             std::lock_guard<std::mutex> lock(frame_mu_);
-            latest_jpeg_ = std::move(encoded);
+            latest_jpeg_.swap(encoded);
             latest_seq_ = seq;
             frame_cv_.notify_all();
         }
@@ -546,6 +523,7 @@ void DisplayPipeline::run() {
         } catch (...) {
             fprintf(stderr, "[ERROR] DisplayPipeline unknown exception\n");
         }
+        if (!surface_released) camera_.release_display_frame();
     }
 }
 

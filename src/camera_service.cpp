@@ -131,6 +131,11 @@ CameraMetrics CameraService::get_metrics() const {
     if (impl_->start_time_ns > 0) {
         m.uptime_ms = (now_ns() - impl_->start_time_ns) / 1000000ULL;
     }
+    if (!running_.load() || m.last_host_ts_ns == 0 ||
+        now_ns() - m.last_host_ts_ns > 1000000000ULL) {
+        m.sensor_fps = 0;
+        m.host_fps = 0;
+    }
     return m;
 }
 
@@ -194,7 +199,7 @@ bool CameraService::start(int ai_width, const std::string& shm_name, int sensor_
 
     impl_->capture_session.reset(cp->createCaptureSession(devs[0]));
     auto cs = interface_cast<ICaptureSession>(impl_->capture_session);
-    if (!cs) return false;
+    if (!cs) { stop(); return false; }
 
     // Main stream
     UniqueObj<OutputStreamSettings> ss_main(cs->createOutputStreamSettings(STREAM_TYPE_EGL));
@@ -238,27 +243,30 @@ bool CameraService::start(int ai_width, const std::string& shm_name, int sensor_
     }
     impl_->apply_controls_to_request();
 
-    if (cs->repeat(impl_->request.get()) != STATUS_OK) return false;
+    if (cs->repeat(impl_->request.get()) != STATUS_OK) { stop(); return false; }
 
     auto egl_main = interface_cast<IEGLOutputStream>(impl_->main_stream);
-    if (egl_main->waitUntilConnected(5000000000ULL) != STATUS_OK) return false;
+    if (egl_main->waitUntilConnected(5000000000ULL) != STATUS_OK) { stop(); return false; }
 
     if (impl_->ai_stream) {
         auto egl_ai = interface_cast<IEGLOutputStream>(impl_->ai_stream);
-        if (egl_ai->waitUntilConnected(5000000000ULL) != STATUS_OK) return false;
+        if (egl_ai->waitUntilConnected(5000000000ULL) != STATUS_OK) { stop(); return false; }
     }
 
     // Warmup frames and verify valid frame acquisition
     auto mfc = interface_cast<IFrameConsumer>(impl_->main_consumer);
     auto afc = impl_->ai_consumer ? interface_cast<IFrameConsumer>(impl_->ai_consumer) : nullptr;
-    bool got_warmup_frame = false;
+    bool warmup_ok = true;
     for (int i = 0; i < 15; ++i) {
         UniqueObj<Frame> f1(mfc->acquireFrame(2000000000ULL));
-        if (f1) got_warmup_frame = true;
-        if (afc) { UniqueObj<Frame> f2(afc->acquireFrame(2000000000ULL)); }
+        if (!f1) { warmup_ok = false; break; }
+        if (afc) {
+            UniqueObj<Frame> f2(afc->acquireFrame(2000000000ULL));
+            if (!f2) { warmup_ok = false; break; }
+        }
     }
-    if (!got_warmup_frame) {
-        fprintf(stderr, "[ERROR] CameraService warmup failed for mode %d: no valid frames!\n", sensor_mode);
+    if (!warmup_ok) {
+        fprintf(stderr, "[ERROR] CameraService warmup failed for mode %d: frame acquisition timed out!\n", sensor_mode);
         stop();
         return false;
     }
@@ -311,7 +319,10 @@ bool CameraService::start(int ai_width, const std::string& shm_name, int sensor_
 }
 
 void CameraService::stop() {
-    if (!running_.exchange(false)) return;
+    // Startup can fail after creating an Argus session but before running_ is set.
+    // Those partial sessions must be torn down too.
+    bool was_running = running_.exchange(false);
+    if (!was_running && !impl_->capture_session && !impl_->camera_provider) return;
     {
         std::lock_guard<std::mutex> dlock(impl_->display_mu);
         impl_->display_wants_frame = false;
@@ -364,6 +375,14 @@ void CameraService::stop() {
     impl_->main_stream.reset();
     impl_->ai_stream.reset();
     impl_->capture_session.reset();
+    // Release the provider as well: retaining it keeps the old sensor/ISP context
+    // alive across mode changes, including a failed startup's error state.
+    impl_->camera_provider.reset();
+    {
+        std::lock_guard<std::mutex> lock(impl_->metrics_mu);
+        impl_->metrics = CameraMetrics{};
+        impl_->start_time_ns = 0;
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
 }
 
@@ -622,8 +641,7 @@ bool CameraService::acquire_display_frame(NvBufSurface** out_surface, uint64_t* 
                                           uint64_t* out_sensor_ts, int timeout_ms) {
     if (!running_.load()) return false;
     std::unique_lock<std::mutex> lock(impl_->display_mu);
-    impl_->display_wants_frame = true;
-    impl_->display_has_frame = false;
+    if (!impl_->display_has_frame) impl_->display_wants_frame = true;
 
     if (!impl_->display_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
                                     [&] { return impl_->display_has_frame || !running_.load(); })) {
@@ -633,9 +651,15 @@ bool CameraService::acquire_display_frame(NvBufSurface** out_surface, uint64_t* 
     if (!running_.load() || !impl_->display_has_frame) return false;
 
     NvBufSurfaceSyncForCpu(impl_->disp_surface, 0, -1);
+    impl_->display_has_frame = false;
     *out_surface = impl_->disp_surface;
     if (out_seq) *out_seq = impl_->disp_seq;
     if (out_sensor_ts) *out_sensor_ts = impl_->disp_sensor_ts;
     return true;
+}
+
+void CameraService::release_display_frame() {
+    std::lock_guard<std::mutex> lock(impl_->display_mu);
+    if (running_.load()) impl_->display_wants_frame = true;
 }
 

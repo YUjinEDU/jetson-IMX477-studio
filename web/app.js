@@ -158,52 +158,176 @@
   let activeHeight = 990;
   let pendingControls = {};
   let pendingDisplay = {};
-  // --- Stream Auto-Reconnect ---
+  // --- Stream Auto-Reconnect & Fallback Loop ---
   let isFallbackLoopRunning = false;
+  let fallbackGeneration = 0;
+  let fallbackAbortController = null;
+  let fallbackTimerId = null;
+  let fallbackCheckTimerId = null;
+  let activeFallbackBlobUrl = null;
+  const fallbackBlobUrls = new Set();
+
+  function revokeFallbackBlobUrlSafely(url) {
+    if (url && fallbackBlobUrls.has(url)) {
+      URL.revokeObjectURL(url);
+      fallbackBlobUrls.delete(url);
+    }
+  }
+
+  function cleanupAllFallbackBlobUrls() {
+    for (const url of fallbackBlobUrls) {
+      URL.revokeObjectURL(url);
+    }
+    fallbackBlobUrls.clear();
+    activeFallbackBlobUrl = null;
+  }
+
+  function getSelectedDisplayFps() {
+    if (!selectViewFps) return 30;
+    const v = parseInt(selectViewFps.value, 10);
+    return (Number.isFinite(v) && v > 0) ? v : 30;
+  }
+
+  function stopFrameLoopFallback() {
+    fallbackGeneration++;
+    isFallbackLoopRunning = false;
+    if (fallbackAbortController) {
+      fallbackAbortController.abort();
+      fallbackAbortController = null;
+    }
+    if (fallbackTimerId) {
+      clearTimeout(fallbackTimerId);
+      fallbackTimerId = null;
+    }
+    if (activeFallbackBlobUrl) {
+      const u = activeFallbackBlobUrl;
+      activeFallbackBlobUrl = null;
+      revokeFallbackBlobUrlSafely(u);
+    }
+    cleanupAllFallbackBlobUrls();
+  }
+
   function startFrameLoopFallback() {
     if (isFallbackLoopRunning) return;
-    isFallbackLoopRunning = true;
-    let busy = false;
-    async function step() {
-      if (!busy) {
-        busy = true;
-        try {
-          const res = await fetch('/api/frame.jpg?t=' + Date.now());
-          if (res.ok) {
-            const blob = await res.blob();
-            const url = URL.createObjectURL(blob);
-            const oldUrl = streamImg.src;
-            streamImg.src = url;
-            if (oldUrl && oldUrl.startsWith('blob:')) {
-              setTimeout(() => URL.revokeObjectURL(oldUrl), 800);
-            }
-          }
-        } catch (e) {}
-        busy = false;
-      }
-      requestAnimationFrame(step);
+    // Keep native stream if painted
+    if (streamImg && streamImg.src.includes('/stream.mjpg') && streamImg.naturalWidth > 0) {
+      return;
     }
-    requestAnimationFrame(step);
+    isFallbackLoopRunning = true;
+    const generation = fallbackGeneration;
+
+    async function step() {
+      if (!isFallbackLoopRunning || generation !== fallbackGeneration) return;
+      const startTime = performance.now();
+      const controller = new AbortController();
+      fallbackAbortController = controller;
+      let blobUrl = null;
+
+      try {
+        const res = await fetch('/api/frame.jpg?t=' + Date.now(), {
+          signal: controller.signal
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        if (!isFallbackLoopRunning || generation !== fallbackGeneration) return;
+
+        blobUrl = URL.createObjectURL(blob);
+        fallbackBlobUrls.add(blobUrl);
+
+        // Wait for decoded image before presentation
+        const img = new Image();
+        img.src = blobUrl;
+        if (img.decode) {
+          await img.decode();
+        } else {
+          await new Promise((resolve, reject) => {
+            img.onload = resolve;
+            img.onerror = () => reject(new Error('Image decode error'));
+          });
+        }
+
+        if (!isFallbackLoopRunning || generation !== fallbackGeneration) {
+          revokeFallbackBlobUrlSafely(blobUrl);
+          return;
+        }
+
+        const prevUrl = activeFallbackBlobUrl;
+        activeFallbackBlobUrl = blobUrl;
+        if (streamImg) {
+          streamImg.src = blobUrl;
+        }
+        if (prevUrl && prevUrl !== blobUrl) {
+          setTimeout(() => revokeFallbackBlobUrlSafely(prevUrl), 200);
+        }
+      } catch (err) {
+        if (blobUrl) {
+          revokeFallbackBlobUrlSafely(blobUrl);
+        }
+      } finally {
+        if (fallbackAbortController === controller) fallbackAbortController = null;
+      }
+
+      if (!isFallbackLoopRunning || generation !== fallbackGeneration) return;
+
+      const elapsed = performance.now() - startTime;
+      const targetFps = getSelectedDisplayFps();
+      const targetInterval = 1000.0 / targetFps;
+      const delay = Math.max(0, targetInterval - elapsed);
+
+      fallbackTimerId = setTimeout(step, delay);
+    }
+
+    step();
+  }
+
+  function scheduleFallbackCheck() {
+    if (fallbackCheckTimerId) {
+      clearTimeout(fallbackCheckTimerId);
+    }
+    fallbackCheckTimerId = setTimeout(() => {
+      fallbackCheckTimerId = null;
+      // Do not use !streamImg.complete: multipart stream complete remains false even when healthy.
+      if (streamImg && streamImg.naturalWidth === 0) {
+        console.warn('Native MJPEG stream not painting, switching to frame loop fallback');
+        startFrameLoopFallback();
+      }
+    }, 1200);
   }
 
   function reloadStream() {
     if (!streamImg) return;
-    streamImg.src = '/stream.mjpg?t=' + Date.now();
-  }
-
-  // If native MJPEG doesn't paint within 1.2s, auto-switch to frame loop
-  setTimeout(() => {
-    if (streamImg && (streamImg.naturalWidth === 0 || !streamImg.complete)) {
-      console.warn('Native MJPEG stream not painting, switching to frame loop fallback');
-      startFrameLoopFallback();
+    stopFrameLoopFallback();
+    if (fallbackCheckTimerId) {
+      clearTimeout(fallbackCheckTimerId);
+      fallbackCheckTimerId = null;
     }
-  }, 1200);
+    streamImg.src = '/stream.mjpg?t=' + Date.now();
+    scheduleFallbackCheck();
+  }
 
   if (streamImg) {
+    streamImg.onload = () => {
+      if (streamImg.src.includes('/stream.mjpg') && streamImg.naturalWidth > 0) {
+        if (fallbackCheckTimerId) {
+          clearTimeout(fallbackCheckTimerId);
+          fallbackCheckTimerId = null;
+        }
+      }
+    };
     streamImg.onerror = () => {
-      startFrameLoopFallback();
+      if (streamImg.src.includes('/stream.mjpg')) {
+        if (fallbackCheckTimerId) {
+          clearTimeout(fallbackCheckTimerId);
+          fallbackCheckTimerId = null;
+        }
+        console.warn('Native MJPEG stream onerror, switching to frame loop fallback');
+        startFrameLoopFallback();
+      }
     };
   }
+
+  scheduleFallbackCheck();
+
 
 
   function showToast(msg) {
@@ -260,30 +384,40 @@
   });
 
   // --- Sensor Mode Switching (4K 30P / 1080 60P / 990 120P) ---
+  let isSwitchingSensorMode = false;
   sensorModeBtns.forEach(btn => {
     btn.addEventListener('click', () => {
+      if (isSwitchingSensorMode) return;
       const mode = parseInt(btn.dataset.sensorMode, 10);
+      isSwitchingSensorMode = true;
+      sensorModeBtns.forEach(b => b.style.pointerEvents = 'none');
       showToast(`Switching to sensor mode ${mode}...`);
       fetch('/api/sensor_mode', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode: mode })
       })
-      .then(r => r.json())
-      .then(d => {
-        if (d.status === 'ok') {
-          sensorModeBtns.forEach(b => b.classList.toggle('active', parseInt(b.dataset.sensorMode, 10) === mode));
-          hudRes.textContent = `${d.width}×${d.height}`;
-          hudSensor.textContent = `${d.target_fps.toFixed(0)} FPS`;
-          showToast(`Active: ${d.width}×${d.height} @ ${d.target_fps} FPS`);
-          // Re-fetch state for new exposure limits
-          fetch('/api/state').then(r => r.json()).then(applyStateToUI);
-          reloadStream();
-        } else {
-          showToast(`Mode switch error: ${d.error || 'Failed'}`);
+      .then(async r => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.status !== 'ok') {
+          throw new Error(d.error || `HTTP ${r.status}`);
         }
+        return d;
       })
-      .catch(e => showToast(`Switch failed: ${e}`));
+      .then(d => {
+        sensorModeBtns.forEach(b => b.classList.toggle('active', parseInt(b.dataset.sensorMode, 10) === mode));
+        hudRes.textContent = `${d.width}×${d.height}`;
+        hudSensor.textContent = `${d.target_fps.toFixed(0)} FPS`;
+        showToast(`Active: ${d.width}×${d.height} @ ${d.target_fps} FPS`);
+        // Re-fetch state for new exposure limits
+        fetch('/api/state').then(r => r.json()).then(applyStateToUI).catch(console.error);
+        reloadStream();
+      })
+      .catch(e => showToast(`Mode switch failed: ${e.message || e}`))
+      .finally(() => {
+        isSwitchingSensorMode = false;
+        sensorModeBtns.forEach(b => b.style.pointerEvents = '');
+      });
     });
   });
 
@@ -851,6 +985,9 @@
       if (shortcutsModal) shortcutsModal.style.display = shortcutsModal.style.display === 'none' ? 'flex' : 'none';
     } else if (e.key === 'Escape') {
       if (shortcutsModal) shortcutsModal.style.display = 'none';
+      if (replayModal && replayModal.style.display !== 'none') {
+        closeReplayModal();
+      }
       if (viewportCard.classList.contains('is-fullscreen')) {
         btnFullscreen.click();
       }
@@ -866,61 +1003,356 @@
   }
 
   // --- Instant Slow-Motion Replay Handlers ---
-  function loadReplayFrame(idx) {
-    if (!currentReplayClip || !replayFrame) return;
-    currentReplayFrame = Math.max(0, Math.min(currentReplayClip.total_frames - 1, idx));
-    replayFrame.src = `/api/clip/frame?path=${encodeURIComponent(currentReplayClip.path)}&frame=${currentReplayFrame}`;
-    if (replayScrubber) replayScrubber.value = currentReplayFrame;
-    if (replayFrameText) replayFrameText.textContent = `Frame ${currentReplayFrame + 1} / ${currentReplayClip.total_frames}`;
+  let replaySessionCounter = 0;
+  let frameRequestId = 0;
+  let replayInfoAbort = null;
+  let activeReplayBlobUrl = null;
+  let replayPlaybackEpoch = 0;
+  const replayCache = new Map();
+  const REPLAY_CACHE_MAX = 16;
+  const inFlightRequests = new Map(); // frameIdx -> { promise, abortController }
+  let prefetchWorkerRunning = false;
+
+  function isUrlInReplayCache(url) {
+    for (const entry of replayCache.values()) {
+      if (entry && entry.blobUrl === url) return true;
+    }
+    return false;
+  }
+
+  function putInReplayCache(idx, entry) {
+    if (replayCache.has(idx)) return;
+    if (replayCache.size >= REPLAY_CACHE_MAX) {
+      const oldestKey = replayCache.keys().next().value;
+      const oldEntry = replayCache.get(oldestKey);
+      replayCache.delete(oldestKey);
+      if (oldEntry && oldEntry.blobUrl !== activeReplayBlobUrl) {
+        URL.revokeObjectURL(oldEntry.blobUrl);
+      }
+    }
+    replayCache.set(idx, entry);
+  }
+
+  function clearReplayCache() {
+    for (const entry of replayCache.values()) {
+      if (entry && entry.blobUrl !== activeReplayBlobUrl) {
+        URL.revokeObjectURL(entry.blobUrl);
+      }
+    }
+    replayCache.clear();
+  }
+
+  function cancelAllInFlight() {
+    frameRequestId++;
+    for (const item of inFlightRequests.values()) {
+      item.abortController.abort();
+    }
+    inFlightRequests.clear();
+  }
+
+  function updateReplayLabels(frameIdx, totalFrames, fps, durationSec) {
+    if (replayFrameText) {
+      replayFrameText.textContent = `Frame ${frameIdx + 1} / ${totalFrames}`;
+    }
     if (replayTimeText) {
-      const curSec = (currentReplayFrame / currentReplayClip.fps).toFixed(2);
-      replayTimeText.textContent = `${curSec}s / ${currentReplayClip.duration_sec.toFixed(2)}s (${currentReplayClip.fps.toFixed(0)} FPS)`;
+      const validFps = (typeof fps === 'number' && fps > 0) ? fps : 30;
+      const curSec = (frameIdx / validFps).toFixed(2);
+      const durSec = (typeof durationSec === 'number' && durationSec > 0) ? durationSec.toFixed(2) : (totalFrames / validFps).toFixed(2);
+      replayTimeText.textContent = `${curSec}s / ${durSec}s (${validFps.toFixed(0)} FPS)`;
     }
   }
 
-  function startReplayPlayback() {
-    if (replayPlaying) return;
-    replayPlaying = true;
-    if (btnReplayPlay) btnReplayPlay.textContent = '⏸ 일시정지';
-    const intervalMs = Math.max(16, Math.round(1000.0 / (currentReplayClip.fps * replaySpeed)));
-    replayTimer = setInterval(() => {
-      if (!currentReplayClip) return;
-      let next = currentReplayFrame + 1;
-      if (next >= currentReplayClip.total_frames) {
-        next = 0; // loop
+  async function fetchAndDecodeFrame(clipPath, frameIdx, signal) {
+    if (signal && signal.aborted) {
+      const err = new Error('Aborted');
+      err.name = 'AbortError';
+      throw err;
+    }
+    const url = `/api/clip/frame?path=${encodeURIComponent(clipPath)}&frame=${frameIdx}`;
+    const res = await fetch(url, { signal });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const blob = await res.blob();
+    if (signal && signal.aborted) {
+      const err = new Error('Aborted');
+      err.name = 'AbortError';
+      throw err;
+    }
+    const blobUrl = URL.createObjectURL(blob);
+    const img = new Image();
+    img.src = blobUrl;
+    try {
+      if (img.decode) {
+        await img.decode();
+      } else {
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = () => reject(new Error('Image decode failed'));
+        });
       }
-      loadReplayFrame(next);
-    }, intervalMs);
+      if (signal && signal.aborted) {
+        URL.revokeObjectURL(blobUrl);
+        const err = new Error('Aborted');
+        err.name = 'AbortError';
+        throw err;
+      }
+    } catch (decodeErr) {
+      URL.revokeObjectURL(blobUrl);
+      throw decodeErr;
+    }
+    return { blobUrl, img };
+  }
+
+  function getOrFetchFrame(clipPath, frameIdx) {
+    if (replayCache.has(frameIdx)) {
+      return Promise.resolve(replayCache.get(frameIdx));
+    }
+    if (inFlightRequests.has(frameIdx)) {
+      return inFlightRequests.get(frameIdx).promise;
+    }
+
+    const abortController = new AbortController();
+    const promise = (async () => {
+      try {
+        const entry = await fetchAndDecodeFrame(clipPath, frameIdx, abortController.signal);
+        putInReplayCache(frameIdx, entry);
+        return entry;
+      } finally {
+        if (inFlightRequests.get(frameIdx)?.abortController === abortController) {
+          inFlightRequests.delete(frameIdx);
+        }
+      }
+    })();
+
+    inFlightRequests.set(frameIdx, { promise, abortController });
+    return promise;
+  }
+
+  function presentDecodedEntry(frameIdx, entry) {
+    if (!currentReplayClip || !replayFrame) return;
+    const oldUrl = activeReplayBlobUrl;
+    activeReplayBlobUrl = entry.blobUrl;
+    replayFrame.src = entry.blobUrl;
+    currentReplayFrame = frameIdx;
+    if (replayScrubber) {
+      replayScrubber.value = frameIdx;
+    }
+    updateReplayLabels(frameIdx, currentReplayClip.total_frames, currentReplayClip.fps, currentReplayClip.duration_sec);
+    if (oldUrl && oldUrl !== entry.blobUrl && !isUrlInReplayCache(oldUrl)) {
+      URL.revokeObjectURL(oldUrl);
+    }
+  }
+
+  async function presentFrame(targetFrame, requirePlaying) {
+    const reqId = ++frameRequestId;
+    const session = replaySessionCounter;
+    if (!currentReplayClip) return false;
+    const clip = currentReplayClip;
+    const target = Math.max(0, Math.min(clip.total_frames - 1, targetFrame));
+
+    try {
+      const entry = await getOrFetchFrame(clip.path, target);
+      if (reqId !== frameRequestId || session !== replaySessionCounter) {
+        return false;
+      }
+      if (requirePlaying && !replayPlaying) {
+        return false;
+      }
+      presentDecodedEntry(target, entry);
+      pumpPrefetch();
+      return true;
+    } catch (err) {
+      if (err.name === 'AbortError') return false;
+      if (reqId !== frameRequestId || session !== replaySessionCounter) return false;
+      console.error('Failed to load frame:', err);
+      showToast(`Failed to load frame ${target + 1}: ${err.message || err}`);
+      return false;
+    }
+  }
+
+  function requestFramePresentation(targetFrame) {
+    cancelAllInFlight();
+    presentFrame(targetFrame, false);
+  }
+
+  function loadReplayFrame(idx) {
+    requestFramePresentation(idx);
+  }
+
+  async function pumpPrefetch() {
+    if (prefetchWorkerRunning || !currentReplayClip || !replayPlaying) return;
+    prefetchWorkerRunning = true;
+    try {
+      const clip = currentReplayClip;
+      const session = replaySessionCounter;
+      const PREFETCH_AHEAD = 4;
+
+      while (replayPlaying && session === replaySessionCounter && currentReplayClip === clip) {
+        let targetIdx = -1;
+        for (let i = 1; i <= PREFETCH_AHEAD; i++) {
+          const idx = (currentReplayFrame + i) % clip.total_frames;
+          if (!replayCache.has(idx) && !inFlightRequests.has(idx)) {
+            targetIdx = idx;
+            break;
+          }
+        }
+
+        if (targetIdx === -1) {
+          break;
+        }
+
+        try {
+          await getOrFetchFrame(clip.path, targetIdx);
+        } catch (e) {
+          break;
+        }
+      }
+    } finally {
+      prefetchWorkerRunning = false;
+    }
+  }
+
+  function scheduleNextPlaybackTick(delay) {
+    if (!replayPlaying) return;
+    clearTimeout(replayTimer);
+    replayTimer = setTimeout(playbackTick, Math.max(0, delay));
+  }
+
+  async function playbackTick() {
+    if (!replayPlaying || !currentReplayClip) return;
+    const clip = currentReplayClip;
+    const session = replaySessionCounter;
+    const epoch = replayPlaybackEpoch;
+
+    const targetFps = Math.max(1, (clip.fps || 30) * replaySpeed);
+    const targetIntervalMs = Math.max(16, Math.round(1000.0 / targetFps));
+
+    let next = currentReplayFrame + 1;
+    if (next >= clip.total_frames) {
+      next = 0; // loop
+    }
+
+    const startTime = performance.now();
+    const ok = await presentFrame(next, true);
+    if (!replayPlaying || session !== replaySessionCounter || epoch !== replayPlaybackEpoch) return;
+    if (!ok) { pauseReplayPlayback(); return; }
+
+    const elapsed = performance.now() - startTime;
+    const remainingDelay = Math.max(0, targetIntervalMs - elapsed);
+
+    scheduleNextPlaybackTick(remainingDelay);
+  }
+
+  function startReplayPlayback() {
+    if (replayPlaying || !currentReplayClip) return;
+    replayPlaying = true;
+    if (btnReplayPlay) {
+      btnReplayPlay.textContent = '⏸ 일시정지';
+    }
+    pumpPrefetch();
+    scheduleNextPlaybackTick(0);
   }
 
   function pauseReplayPlayback() {
+    replayPlaybackEpoch++;
     replayPlaying = false;
-    clearInterval(replayTimer);
-    if (btnReplayPlay) btnReplayPlay.textContent = '▶ 재생';
+    clearTimeout(replayTimer);
+    replayTimer = null;
+    if (btnReplayPlay) {
+      btnReplayPlay.textContent = '▶ 재생';
+    }
+  }
+
+  function closeReplayModal() {
+    replaySessionCounter++;
+    pauseReplayPlayback();
+    cancelAllInFlight();
+    if (replayInfoAbort) {
+      replayInfoAbort.abort();
+      replayInfoAbort = null;
+    }
+    clearReplayCache();
+    if (activeReplayBlobUrl) {
+      URL.revokeObjectURL(activeReplayBlobUrl);
+      activeReplayBlobUrl = null;
+    }
+    if (replayFrame) {
+      replayFrame.removeAttribute('src');
+    }
+    currentReplayClip = null;
+    if (replayModal) {
+      replayModal.style.display = 'none';
+    }
   }
 
   function openReplayModal(path, title) {
     if (!replayModal) return;
+    const session = ++replaySessionCounter;
     pauseReplayPlayback();
-    fetch(`/api/clip/info?path=${encodeURIComponent(path)}`)
-      .then(r => r.json())
+    cancelAllInFlight();
+    if (replayInfoAbort) {
+      replayInfoAbort.abort();
+      replayInfoAbort = null;
+    }
+    clearReplayCache();
+    if (activeReplayBlobUrl) {
+      URL.revokeObjectURL(activeReplayBlobUrl);
+      activeReplayBlobUrl = null;
+    }
+    if (replayFrame) {
+      replayFrame.removeAttribute('src');
+    }
+    currentReplayClip = null;
+
+    if (replayModalTitle) replayModalTitle.textContent = `⚾ ${title || 'Instant Replay'}`;
+    if (replayScrubber) {
+      replayScrubber.disabled = true;
+      replayScrubber.value = 0;
+    }
+    if (replayFrameText) replayFrameText.textContent = 'Loading...';
+    if (replayTimeText) replayTimeText.textContent = '0.00s / 0.00s';
+    replayModal.style.display = 'flex';
+
+    replayInfoAbort = new AbortController();
+    fetch(`/api/clip/info?path=${encodeURIComponent(path)}`, { signal: replayInfoAbort.signal })
+      .then(async r => {
+        if (!r.ok) {
+          throw new Error(`HTTP ${r.status}`);
+        }
+        return r.json();
+      })
       .then(info => {
-        if (!info || !info.total_frames) {
+        if (session !== replaySessionCounter) return;
+        if (!info || !Number.isInteger(info.total_frames) || info.total_frames <= 0 ||
+            !Number.isFinite(info.fps) || info.fps <= 0) {
           showToast('Cannot open video clip');
+          closeReplayModal();
           return;
         }
         currentReplayClip = info;
-        if (replayModalTitle) replayModalTitle.textContent = `⚾ ${title || 'Instant Replay'}`;
+        currentReplayFrame = 0;
         if (replayScrubber) {
+          replayScrubber.disabled = false;
           replayScrubber.min = 0;
           replayScrubber.max = info.total_frames - 1;
           replayScrubber.value = 0;
         }
-        replayModal.style.display = 'flex';
-        loadReplayFrame(0);
-        startReplayPlayback();
+        presentFrame(0, false).then(ok => {
+          if (session === replaySessionCounter && ok) {
+            startReplayPlayback();
+          }
+        }).catch(err => {
+          if (session !== replaySessionCounter) return;
+          console.error('Failed to present initial frame:', err);
+        });
       })
-      .catch(e => showToast(`Failed to open clip: ${e}`));
+      .catch(e => {
+        if (e.name === 'AbortError') return;
+        if (session !== replaySessionCounter) return;
+        showToast(`Failed to open clip: ${e.message || e}`);
+        closeReplayModal();
+      });
   }
 
   if (btnReplayPlay) {
@@ -933,21 +1365,29 @@
   if (replayScrubber) {
     replayScrubber.addEventListener('input', () => {
       pauseReplayPlayback();
-      loadReplayFrame(parseInt(replayScrubber.value, 10));
+      if (!currentReplayClip) return;
+      const target = parseInt(replayScrubber.value, 10);
+      if (Number.isFinite(target)) {
+        requestFramePresentation(target);
+      }
     });
   }
 
   if (btnStepPrev) {
     btnStepPrev.addEventListener('click', () => {
       pauseReplayPlayback();
-      loadReplayFrame(currentReplayFrame - 1);
+      if (!currentReplayClip) return;
+      const target = Math.max(0, currentReplayFrame - 1);
+      requestFramePresentation(target);
     });
   }
 
   if (btnStepNext) {
     btnStepNext.addEventListener('click', () => {
       pauseReplayPlayback();
-      loadReplayFrame(currentReplayFrame + 1);
+      if (!currentReplayClip) return;
+      const target = Math.min(currentReplayClip.total_frames - 1, currentReplayFrame + 1);
+      requestFramePresentation(target);
     });
   }
 
@@ -966,18 +1406,14 @@
 
   if (btnCloseReplay) {
     btnCloseReplay.addEventListener('click', () => {
-      pauseReplayPlayback();
-      currentReplayClip = null;
-      replayModal.style.display = 'none';
+      closeReplayModal();
     });
   }
 
   if (replayModal) {
     replayModal.addEventListener('click', (e) => {
       if (e.target === replayModal) {
-        pauseReplayPlayback();
-        currentReplayClip = null;
-        replayModal.style.display = 'none';
+        closeReplayModal();
       }
     });
   }

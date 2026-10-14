@@ -11,6 +11,222 @@
 #include <sstream>
 #include <chrono>
 #include <fstream>
+#include <cmath>
+#include <cctype>
+#include <limits>
+#include <filesystem>
+#include <unordered_map>
+
+enum class ResolveStatus {
+    Ok,
+    InvalidInput, // 400
+    NotFound      // 404
+};
+
+struct ResolvedRecording {
+    std::string filename;
+    std::filesystem::path canonical_path;
+    uint64_t file_size = 0;
+    std::filesystem::file_time_type mtime{};
+};
+
+static ResolveStatus resolve_recording_path(const std::string& raw_path, ResolvedRecording& out) {
+    if (raw_path.empty()) {
+        return ResolveStatus::InvalidInput;
+    }
+    for (char c : raw_path) {
+        if (c == '\0' || c == '\\') {
+            return ResolveStatus::InvalidInput;
+        }
+    }
+    if (raw_path.find("..") != std::string::npos) {
+        return ResolveStatus::InvalidInput;
+    }
+
+    std::string filename;
+    if (raw_path.rfind("/recordings/", 0) == 0) {
+        filename = raw_path.substr(12);
+    } else if (raw_path.rfind("recordings/", 0) == 0) {
+        filename = raw_path.substr(11);
+    } else if (raw_path[0] == '/') {
+        return ResolveStatus::InvalidInput;
+    } else {
+        filename = raw_path;
+    }
+
+    if (filename.empty()) {
+        return ResolveStatus::InvalidInput;
+    }
+    if (filename.find('/') != std::string::npos) {
+        return ResolveStatus::InvalidInput;
+    }
+
+    size_t dot_pos = filename.rfind('.');
+    if (dot_pos == std::string::npos || dot_pos == 0) {
+        return ResolveStatus::InvalidInput;
+    }
+    std::string ext = filename.substr(dot_pos);
+    for (char& c : ext) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (ext != ".avi" && ext != ".mp4") {
+        return ResolveStatus::InvalidInput;
+    }
+
+    for (char c : filename) {
+        unsigned char uc = static_cast<unsigned char>(c);
+        if (uc < 32 || uc == 127) {
+            return ResolveStatus::InvalidInput;
+        }
+    }
+
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path recordings_dir = fs::canonical("recordings", ec);
+    if (ec || !fs::is_directory(recordings_dir, ec)) {
+        return ResolveStatus::NotFound;
+    }
+
+    fs::path candidate = recordings_dir / filename;
+    if (!fs::exists(candidate, ec) || ec) {
+        return ResolveStatus::NotFound;
+    }
+
+    fs::path canon_file = fs::canonical(candidate, ec);
+    if (ec) {
+        return ResolveStatus::NotFound;
+    }
+
+    if (!fs::is_regular_file(canon_file, ec) || ec) {
+        return ResolveStatus::NotFound;
+    }
+
+    if (canon_file.parent_path() != recordings_dir) {
+        return ResolveStatus::InvalidInput;
+    }
+
+    out.filename = filename;
+    out.canonical_path = canon_file;
+    out.file_size = fs::file_size(canon_file, ec);
+    if (ec) return ResolveStatus::NotFound;
+    out.mtime = fs::last_write_time(canon_file, ec);
+    if (ec) return ResolveStatus::NotFound;
+
+    return ResolveStatus::Ok;
+}
+
+static bool parse_nonnegative_int(const std::string& str, int& out) {
+    if (str.empty()) return false;
+    for (char c : str) {
+        if (c < '0' || c > '9') return false;
+    }
+    uint64_t val = 0;
+    for (char c : str) {
+        val = val * 10 + static_cast<uint64_t>(c - '0');
+        if (val > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+            return false;
+        }
+    }
+    out = static_cast<int>(val);
+    return true;
+}
+
+struct CaptureSession {
+    std::mutex mu;
+    std::string canon_path;
+    uint64_t file_size = 0;
+    std::filesystem::file_time_type mtime{};
+    cv::VideoCapture cap;
+    int current_frame_pos = -1;
+    double fps = 0.0;
+    int total_frames = 0;
+    int width = 0;
+    int height = 0;
+    std::chrono::steady_clock::time_point last_used{};
+
+    bool read_frame(int target_frame, cv::Mat& out_frame) {
+        if (!cap.isOpened()) return false;
+        if (target_frame < 0) return false;
+        if (total_frames > 0 && target_frame >= total_frames) return false;
+
+        if (current_frame_pos != target_frame) {
+            if (!cap.set(cv::CAP_PROP_POS_FRAMES, target_frame)) return false;
+            current_frame_pos = target_frame;
+        }
+
+        if (!cap.read(out_frame) || out_frame.empty()) {
+            current_frame_pos = -1;
+            return false;
+        }
+
+        current_frame_pos = target_frame + 1;
+        return true;
+    }
+};
+
+class ClipCache {
+public:
+    static constexpr size_t MAX_SESSIONS = 8;
+
+    std::shared_ptr<CaptureSession> get_or_open(
+        const std::string& canon_path,
+        uint64_t file_size,
+        std::filesystem::file_time_type mtime)
+    {
+        std::unique_lock<std::mutex> lock(mu_);
+        auto now = std::chrono::steady_clock::now();
+
+        auto it = sessions_.find(canon_path);
+        if (it != sessions_.end()) {
+            auto session = it->second;
+            if (session->file_size == file_size && session->mtime == mtime && session->cap.isOpened()) {
+                session->last_used = now;
+                return session;
+            }
+            sessions_.erase(it);
+        }
+
+        if (sessions_.size() >= MAX_SESSIONS) {
+            auto oldest_it = sessions_.begin();
+            for (auto sit = sessions_.begin(); sit != sessions_.end(); ++sit) {
+                if (sit->second->last_used < oldest_it->second->last_used) {
+                    oldest_it = sit;
+                }
+            }
+            if (oldest_it != sessions_.end()) {
+                sessions_.erase(oldest_it);
+            }
+        }
+
+        auto new_session = std::make_shared<CaptureSession>();
+        new_session->canon_path = canon_path;
+        new_session->file_size = file_size;
+        new_session->mtime = mtime;
+        new_session->last_used = now;
+
+        if (!new_session->cap.open(canon_path)) {
+            return nullptr;
+        }
+
+        double raw_fps = new_session->cap.get(cv::CAP_PROP_FPS);
+        if (std::isnan(raw_fps) || std::isinf(raw_fps) || raw_fps < 0.0) {
+            new_session->fps = 0.0;
+        } else {
+            new_session->fps = raw_fps;
+        }
+        new_session->total_frames = static_cast<int>(new_session->cap.get(cv::CAP_PROP_FRAME_COUNT));
+        new_session->width = static_cast<int>(new_session->cap.get(cv::CAP_PROP_FRAME_WIDTH));
+        new_session->height = static_cast<int>(new_session->cap.get(cv::CAP_PROP_FRAME_HEIGHT));
+        new_session->current_frame_pos = 0;
+
+        sessions_[canon_path] = new_session;
+        return new_session;
+    }
+
+private:
+    std::mutex mu_;
+    std::unordered_map<std::string, std::shared_ptr<CaptureSession>> sessions_;
+};
 
 static float get_cpu_temp_c() {
     std::ifstream f("/sys/devices/virtual/thermal/thermal_zone0/temp");
@@ -46,6 +262,7 @@ struct HttpServer::Impl {
     int port;
     httplib::Server svr;
     std::mutex sensor_mode_tx_mu;
+    ClipCache clip_cache;
 
     Impl(CameraService& c, DisplayPipeline& d, PresetManager& p,
          const std::string& wd, const std::string& h, int pt)
@@ -589,86 +806,102 @@ bool HttpServer::start() {
     });
 
     // 7f. API: Frame-Accurate Video Clip Replay Proxy
-    impl_->svr.Get("/api/clip/info", [](const httplib::Request& req, httplib::Response& res) {
+    impl_->svr.Get("/api/clip/info", [this](const httplib::Request& req, httplib::Response& res) {
         if (!req.has_param("path")) {
             res.status = 400;
             res.set_content("{\"error\":\"missing path\"}", "application/json");
             return;
         }
         std::string raw_path = req.get_param_value("path");
-        std::filesystem::path p(raw_path);
-        std::string filename = p.filename().string();
-        if (filename.empty() || raw_path.find("..") != std::string::npos) {
+        ResolvedRecording resolved;
+        ResolveStatus st = resolve_recording_path(raw_path, resolved);
+        if (st == ResolveStatus::InvalidInput) {
             res.status = 400;
             res.set_content("{\"error\":\"invalid filename\"}", "application/json");
             return;
         }
-        std::string safe_path = "recordings/" + filename;
-        cv::VideoCapture cap(safe_path);
-        if (!cap.isOpened()) {
+        if (st == ResolveStatus::NotFound) {
             res.status = 404;
             res.set_content("{\"error\":\"cannot open video clip\"}", "application/json");
             return;
         }
-        double fps = cap.get(cv::CAP_PROP_FPS);
-        int total = (int)cap.get(cv::CAP_PROP_FRAME_COUNT);
-        int w = (int)cap.get(cv::CAP_PROP_FRAME_WIDTH);
-        int h = (int)cap.get(cv::CAP_PROP_FRAME_HEIGHT);
+
+        auto session = impl_->clip_cache.get_or_open(
+            resolved.canonical_path.string(), resolved.file_size, resolved.mtime);
+        if (!session) {
+            res.status = 404;
+            res.set_content("{\"error\":\"cannot open video clip\"}", "application/json");
+            return;
+        }
+
+        double fps = session->fps;
+        int total = session->total_frames;
+        int w = session->width;
+        int h = session->height;
         json info = {
             {"path", raw_path},
-            {"filename", filename},
-            {"fps", fps > 0 ? fps : 30.0},
+            {"filename", resolved.filename},
+            {"fps", fps},
             {"total_frames", total},
             {"width", w},
             {"height", h},
-            {"duration_sec", (fps > 0 ? (double)total / fps : 0.0)}
+            {"duration_sec", (fps > 0.0 ? static_cast<double>(total) / fps : 0.0)}
         };
         res.set_content(info.dump(), "application/json");
     });
 
-    impl_->svr.Get("/api/clip/frame", [](const httplib::Request& req, httplib::Response& res) {
+    impl_->svr.Get("/api/clip/frame", [this](const httplib::Request& req, httplib::Response& res) {
         if (!req.has_param("path")) {
             res.status = 400;
             res.set_content("missing path", "text/plain");
             return;
         }
         std::string raw_path = req.get_param_value("path");
-        std::filesystem::path p(raw_path);
-        std::string filename = p.filename().string();
-        if (filename.empty() || raw_path.find("..") != std::string::npos) {
+        ResolvedRecording resolved;
+        ResolveStatus st = resolve_recording_path(raw_path, resolved);
+        if (st == ResolveStatus::InvalidInput) {
             res.status = 400;
             res.set_content("invalid filename", "text/plain");
             return;
         }
-        std::string safe_path = "recordings/" + filename;
+        if (st == ResolveStatus::NotFound) {
+            res.status = 404;
+            res.set_content("cannot open video", "text/plain");
+            return;
+        }
+
         int frame_idx = 0;
         if (req.has_param("frame")) {
-            try {
-                frame_idx = std::max(0, std::stoi(req.get_param_value("frame")));
-            } catch (...) {
+            if (!parse_nonnegative_int(req.get_param_value("frame"), frame_idx)) {
                 res.status = 400;
                 res.set_content("invalid frame index", "text/plain");
                 return;
             }
         }
-        cv::VideoCapture cap(safe_path);
-        if (!cap.isOpened()) {
+
+        auto session = impl_->clip_cache.get_or_open(
+            resolved.canonical_path.string(), resolved.file_size, resolved.mtime);
+        if (!session) {
             res.status = 404;
             res.set_content("cannot open video", "text/plain");
             return;
         }
-        cap.set(cv::CAP_PROP_POS_FRAMES, frame_idx);
+
         cv::Mat frame;
-        if (!cap.read(frame) || frame.empty()) {
-            res.status = 404;
-            res.set_content("frame not found", "text/plain");
-            return;
+        {
+            std::lock_guard<std::mutex> lock(session->mu);
+            if (!session->read_frame(frame_idx, frame)) {
+                res.status = 404;
+                res.set_content("frame not found", "text/plain");
+                return;
+            }
         }
+
         std::vector<uint8_t> buf;
         cv::imencode(".jpg", frame, buf);
         res.set_header("Access-Control-Allow-Origin", "*");
         res.set_header("Cache-Control", "public, max-age=3600");
-        res.set_content((const char*)buf.data(), buf.size(), "image/jpeg");
+        res.set_content(reinterpret_cast<const char*>(buf.data()), buf.size(), "image/jpeg");
     });
 
 

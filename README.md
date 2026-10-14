@@ -24,7 +24,7 @@ Provides an intuitive browser-based control dashboard, zero-drop frame acquisiti
   - **Luma Histogram**: 64-bin distribution bar graph updated at 4Hz.
   - **Motion Blur Calculator**: Enter object speed (e.g., 140 km/h baseball) to calculate theoretical motion streak in centimeters and sensor pixels.
   - **Pan & Zoom**: Fit, 1:1 Native pixel crop, and 2&times; digital crop with click-to-center navigation.
-- **Full-Resolution Snapshots**: Saves 1332&times;990 JPEG images with timestamped JSON metadata sidecars.
+- **Full-Resolution Snapshots**: Saves sensor-resolution JPEG images with timestamped JSON metadata sidecars, including 3840&times;2160 in 4K mode.
 - **Multi-Process AI Fanout (`StudioCamera`)**: High-speed POSIX shared-memory ring buffer (64 slots) with seqlock synchronization and futex wakeups. Allows Python AI pipelines (YOLO) to consume raw BGR frames concurrently at a sustained **120+ fps with 0 drops**.
 
 ---
@@ -114,6 +114,41 @@ Open your browser and navigate to:
 ```text
 http://<jetson-ip>:8477
 ```
+
+### Preview, Sensor Modes & Replay
+
+- Sensor modes: **4K/30**, **1080/60**, and **1332×990/120**. A mode change
+  releases the Argus session and provider before reopening the camera; the UI
+  serializes mode changes. Failed startup cleans up its partial session, and
+  stopped/stale capture reports zero FPS rather than the previous live value.
+- Preview targets **30fps independently of sensor FPS**. Pitched Y/chroma planes
+  are resized before RGB conversion; full-resolution RGB is generated only for
+  snapshots. After the surface has been read, capture is rearmed while overlays
+  and JPEG encoding process the independent RGB image.
+- Browsers retain native MJPEG when it has painted a frame. Single-JPEG fallback
+  is decode-aware and capped at the selected preview FPS; reloading the stream
+  cancels the old fallback loop.
+- **MEDIA → SLOW-MO REPLAY** decodes recorded AVI frames through the clip API,
+  avoiding the browser's lack of native MJPEG-in-AVI playback. Replay prefetches
+  a bounded set of decoded frames, supports 0.1×/0.25×/0.5×/1× playback and exact
+  one-frame stepping, and ignores cancelled scrub/close/clip-switch responses.
+- Recordings and pitch clips contain **preview frames**, not the full-rate
+  120fps sensor stream. Replay timing uses the clip's actual container FPS.
+  Network/decode delays can reduce playback speed; frames are not advanced
+  before they have decoded. Motion detection uses clean pre-overlay grayscale.
+- `GET /api/clip/info?path=/recordings/<file>.avi` returns FPS, frame count,
+  dimensions and duration. `GET /api/clip/frame?path=...&frame=N` returns JPEG.
+  Both resolve validated files strictly beneath `recordings/`; traversal and
+  escaping symlinks are rejected. Malformed/negative/overflowing frame indices
+  return **400**; missing files or frames return **404**. A bounded decoder
+  cache reuses consecutive reads and invalidates on file size/mtime changes.
+
+Local hardware/Firefox verification (2026-10-14): mode transitions 120→60→30→120,
+4K preview 29.84fps, 1080 preview 30.10fps, and 120-mode preview 30.13fps.
+A 66.06s hardware soak captured 7,938 frames at 120.160fps with zero sequence
+gaps, one sensor-interval anomaly, and no API errors. Gallery clicks, all replay
+speeds, one-frame stepping, delayed rapid scrubbing and close cancellation were
+exercised in Firefox. Remote Windows playback latency was not measured.
 
 ---
 
