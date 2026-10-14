@@ -76,6 +76,26 @@ void PresetManager::ensure_defaults() {
         };
         save_preset("default-120fps", j);
     }
+
+    auto indoor_path = storage_dir_ + "/indoor-office-120fps.json";
+    if (!fs::exists(indoor_path)) {
+        nlohmann::json j = {
+            {"description", "Indoor 60Hz room lighting: 8ms exposure, 8x gain, fluorescent white balance"},
+            {"controls", {
+                {"auto_exposure", false},
+                {"exposure_us", 8000},
+                {"gain", 8.0},
+                {"awb_mode", "fluorescent"},
+                {"antibanding", "60hz"}
+            }},
+            {"display", {
+                {"zoom_mode", "fit"},
+                {"fps_limit", 30},
+                {"grid_mode", "none"}
+            }}
+        };
+        save_preset("indoor-office-120fps", j);
+    }
 }
 
 std::vector<std::string> PresetManager::list_presets() const {
