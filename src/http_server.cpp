@@ -588,6 +588,66 @@ bool HttpServer::start() {
         }
     });
 
+    // 7f. API: Frame-Accurate Video Clip Replay Proxy
+    impl_->svr.Get("/api/clip/info", [](const httplib::Request& req, httplib::Response& res) {
+        if (!req.has_param("path")) {
+            res.status = 400;
+            res.set_content("{\"error\":\"missing path\"}", "application/json");
+            return;
+        }
+        std::string path = req.get_param_value("path");
+        cv::VideoCapture cap(path);
+        if (!cap.isOpened()) {
+            res.status = 404;
+            res.set_content("{\"error\":\"cannot open video clip\"}", "application/json");
+            return;
+        }
+        double fps = cap.get(cv::CAP_PROP_FPS);
+        int total = (int)cap.get(cv::CAP_PROP_FRAME_COUNT);
+        int w = (int)cap.get(cv::CAP_PROP_FRAME_WIDTH);
+        int h = (int)cap.get(cv::CAP_PROP_FRAME_HEIGHT);
+        json info = {
+            {"path", path},
+            {"fps", fps > 0 ? fps : 30.0},
+            {"total_frames", total},
+            {"width", w},
+            {"height", h},
+            {"duration_sec", (fps > 0 ? (double)total / fps : 0.0)}
+        };
+        res.set_content(info.dump(), "application/json");
+    });
+
+    impl_->svr.Get("/api/clip/frame", [](const httplib::Request& req, httplib::Response& res) {
+        if (!req.has_param("path")) {
+            res.status = 400;
+            res.set_content("{\"error\":\"missing path\"}", "application/json");
+            return;
+        }
+        std::string path = req.get_param_value("path");
+        int frame_idx = 0;
+        if (req.has_param("frame")) {
+            frame_idx = std::max(0, std::stoi(req.get_param_value("frame")));
+        }
+        cv::VideoCapture cap(path);
+        if (!cap.isOpened()) {
+            res.status = 404;
+            res.set_content("cannot open video", "text/plain");
+            return;
+        }
+        cap.set(cv::CAP_PROP_POS_FRAMES, frame_idx);
+        cv::Mat frame;
+        if (!cap.read(frame) || frame.empty()) {
+            res.status = 404;
+            res.set_content("frame not found", "text/plain");
+            return;
+        }
+        std::vector<uint8_t> buf;
+        cv::imencode(".jpg", frame, buf);
+        res.set_header("Access-Control-Allow-Origin", "*");
+        res.set_header("Cache-Control", "public, max-age=3600");
+        res.set_content((const char*)buf.data(), buf.size(), "image/jpeg");
+    });
+
 
     // 8. API: Presets
     impl_->svr.Get("/api/presets", [this](const httplib::Request&, httplib::Response& res) {

@@ -288,10 +288,9 @@ void DisplayPipeline::run() {
 
 
         // Grayscale conversion shared by Peaking and Zebra
+        // Clean grayscale conversion before ANY overlays
         cv::Mat gray;
-        if (s.focus_peaking || s.zebra_stripes) {
-            cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
-        }
+        cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
 
         // 4. Overlays: Focus Peaking
         if (s.focus_peaking) {
@@ -419,9 +418,7 @@ void DisplayPipeline::run() {
         {
             std::lock_guard<std::mutex> clock(calib_mu_);
             if (calib_request_capture_) {
-                cv::Mat calib_gray;
-                if (gray.empty()) cv::cvtColor(bgr, calib_gray, cv::COLOR_BGR2GRAY);
-                else calib_gray = gray;
+                cv::Mat calib_gray = gray;
                 cv::Size board_size(9, 6);
                 std::vector<cv::Point2f> corners;
                 bool found = cv::findChessboardCorners(calib_gray, board_size, corners,
@@ -450,9 +447,7 @@ void DisplayPipeline::run() {
 
             // Auto Motion Detection
             if (pitch_config_.enabled) {
-                cv::Mat det_gray;
-                if (gray.empty()) cv::cvtColor(bgr, det_gray, cv::COLOR_BGR2GRAY);
-                else det_gray = gray;
+                cv::Mat det_gray = gray;
 
                 if (!prev_detect_gray_.empty() && prev_detect_gray_.size() == det_gray.size()) {
                     cv::Mat diff, thresh_mask;

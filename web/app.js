@@ -86,11 +86,21 @@
 
   // Instant Replay Elements
   const replayModal = document.getElementById('replay-modal');
-  const replayVideo = document.getElementById('replay-video');
+  const replayFrame = document.getElementById('replay-frame');
   const replayModalTitle = document.getElementById('replay-modal-title');
   const btnCloseReplay = document.getElementById('btn-close-replay');
+  const btnReplayPlay = document.getElementById('btn-replay-play');
+  const replayScrubber = document.getElementById('replay-scrubber');
+  const replayFrameText = document.getElementById('replay-frame-text');
+  const replayTimeText = document.getElementById('replay-time-text');
   const btnStepPrev = document.getElementById('btn-step-prev');
   const btnStepNext = document.getElementById('btn-step-next');
+
+  let currentReplayClip = null;
+  let currentReplayFrame = 0;
+  let replayPlaying = false;
+  let replayTimer = null;
+  let replaySpeed = 0.25;
 
   // Presets & Media
   const presetSelect = document.getElementById('preset-select');
@@ -856,31 +866,88 @@
   }
 
   // --- Instant Slow-Motion Replay Handlers ---
-  function openReplayModal(url, title) {
-    if (!replayModal || !replayVideo) return;
-    if (replayModalTitle) replayModalTitle.textContent = `⚾ ${title || 'Instant Replay'}`;
-    replayVideo.src = url;
-    replayVideo.playbackRate = 0.25; // default slow-motion
-    replayModal.style.display = 'flex';
-    replayVideo.play().catch(() => {});
-    document.querySelectorAll('.btn-speed').forEach(b => b.classList.toggle('active', b.dataset.speed === '0.25'));
+  function loadReplayFrame(idx) {
+    if (!currentReplayClip || !replayFrame) return;
+    currentReplayFrame = Math.max(0, Math.min(currentReplayClip.total_frames - 1, idx));
+    replayFrame.src = `/api/clip/frame?path=${encodeURIComponent(currentReplayClip.path)}&frame=${currentReplayFrame}`;
+    if (replayScrubber) replayScrubber.value = currentReplayFrame;
+    if (replayFrameText) replayFrameText.textContent = `Frame ${currentReplayFrame + 1} / ${currentReplayClip.total_frames}`;
+    if (replayTimeText) {
+      const curSec = (currentReplayFrame / currentReplayClip.fps).toFixed(2);
+      replayTimeText.textContent = `${curSec}s / ${currentReplayClip.duration_sec.toFixed(2)}s (${currentReplayClip.fps.toFixed(0)} FPS)`;
+    }
   }
 
-  if (btnCloseReplay) {
-    btnCloseReplay.addEventListener('click', () => {
-      replayVideo.pause();
-      replayVideo.src = '';
-      replayModal.style.display = 'none';
+  function startReplayPlayback() {
+    if (replayPlaying) return;
+    replayPlaying = true;
+    if (btnReplayPlay) btnReplayPlay.textContent = '⏸ 일시정지';
+    const intervalMs = Math.max(16, Math.round(1000.0 / (currentReplayClip.fps * replaySpeed)));
+    replayTimer = setInterval(() => {
+      if (!currentReplayClip) return;
+      let next = currentReplayFrame + 1;
+      if (next >= currentReplayClip.total_frames) {
+        next = 0; // loop
+      }
+      loadReplayFrame(next);
+    }, intervalMs);
+  }
+
+  function pauseReplayPlayback() {
+    replayPlaying = false;
+    clearInterval(replayTimer);
+    if (btnReplayPlay) btnReplayPlay.textContent = '▶ 재생';
+  }
+
+  function openReplayModal(path, title) {
+    if (!replayModal) return;
+    pauseReplayPlayback();
+    fetch(`/api/clip/info?path=${encodeURIComponent(path)}`)
+      .then(r => r.json())
+      .then(info => {
+        if (!info || !info.total_frames) {
+          showToast('Cannot open video clip');
+          return;
+        }
+        currentReplayClip = info;
+        if (replayModalTitle) replayModalTitle.textContent = `⚾ ${title || 'Instant Replay'}`;
+        if (replayScrubber) {
+          replayScrubber.min = 0;
+          replayScrubber.max = info.total_frames - 1;
+          replayScrubber.value = 0;
+        }
+        replayModal.style.display = 'flex';
+        loadReplayFrame(0);
+        startReplayPlayback();
+      })
+      .catch(e => showToast(`Failed to open clip: ${e}`));
+  }
+
+  if (btnReplayPlay) {
+    btnReplayPlay.addEventListener('click', () => {
+      if (replayPlaying) pauseReplayPlayback();
+      else startReplayPlayback();
     });
   }
 
-  if (replayModal) {
-    replayModal.addEventListener('click', (e) => {
-      if (e.target === replayModal) {
-        replayVideo.pause();
-        replayVideo.src = '';
-        replayModal.style.display = 'none';
-      }
+  if (replayScrubber) {
+    replayScrubber.addEventListener('input', () => {
+      pauseReplayPlayback();
+      loadReplayFrame(parseInt(replayScrubber.value, 10));
+    });
+  }
+
+  if (btnStepPrev) {
+    btnStepPrev.addEventListener('click', () => {
+      pauseReplayPlayback();
+      loadReplayFrame(currentReplayFrame - 1);
+    });
+  }
+
+  if (btnStepNext) {
+    btnStepNext.addEventListener('click', () => {
+      pauseReplayPlayback();
+      loadReplayFrame(currentReplayFrame + 1);
     });
   }
 
@@ -888,29 +955,32 @@
     btn.addEventListener('click', () => {
       document.querySelectorAll('.btn-speed').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
-      const rate = parseFloat(btn.dataset.speed);
-      if (replayVideo) replayVideo.playbackRate = rate;
-      showToast(`Replay Speed: ${rate}×`);
+      replaySpeed = parseFloat(btn.dataset.speed);
+      showToast(`Slow-Mo Speed: ${replaySpeed}×`);
+      if (replayPlaying) {
+        pauseReplayPlayback();
+        startReplayPlayback();
+      }
     });
   });
 
-  if (btnStepPrev) {
-    btnStepPrev.addEventListener('click', () => {
-      if (replayVideo) {
-        replayVideo.pause();
-        replayVideo.currentTime = Math.max(0, replayVideo.currentTime - (1.0 / 30.0));
-      }
-    });
-  }
-  if (btnStepNext) {
-    btnStepNext.addEventListener('click', () => {
-      if (replayVideo) {
-        replayVideo.pause();
-        replayVideo.currentTime = Math.min(replayVideo.duration, replayVideo.currentTime + (1.0 / 30.0));
-      }
+  if (btnCloseReplay) {
+    btnCloseReplay.addEventListener('click', () => {
+      pauseReplayPlayback();
+      currentReplayClip = null;
+      replayModal.style.display = 'none';
     });
   }
 
+  if (replayModal) {
+    replayModal.addEventListener('click', (e) => {
+      if (e.target === replayModal) {
+        pauseReplayPlayback();
+        currentReplayClip = null;
+        replayModal.style.display = 'none';
+      }
+    });
+  }
   // --- Zoom & Minimap Handlers ---
   zoomBtns.forEach(btn => {
     btn.addEventListener('click', () => {

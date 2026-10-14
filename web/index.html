@@ -540,14 +540,21 @@
         <button id="btn-close-replay" class="btn-close">&times;</button>
       </div>
       <div class="modal-content" style="padding: 10px; background: #080c14;">
-        <video id="replay-video" style="width: 100%; border-radius: 4px; display: block;" controls playsinline></video>
-        <div class="row-between" style="margin-top: 10px; padding: 0 4px;">
+        <div style="position: relative; background: #000; border-radius: 4px; overflow: hidden; display: flex; align-items: center; justify-content: center; min-height: 380px;">
+          <img id="replay-frame" style="max-width: 100%; max-height: 60vh; object-fit: contain; display: block;" alt="Replay Frame">
+        </div>
+        <input type="range" id="replay-scrubber" min="0" max="100" value="0" class="studio-slider" style="margin-top: 8px;">
+        <div class="row-between" style="font-size: 11px; color: #94a3b8; font-family: var(--font-mono); margin-top: 2px;">
+          <span id="replay-frame-text">Frame 0 / 0</span>
+          <span id="replay-time-text">0.00s / 0.00s</span>
+        </div>
+        <div class="row-between" style="margin-top: 8px; padding: 0 4px;">
           <div class="seg-group seg-xs">
-            <span class="strip-label" style="align-self: center; margin-right: 4px; color: #94a3b8;">배속:</span>
+            <button id="btn-replay-play" class="seg-btn active" style="color: #fff; background: var(--accent);">▶ 재생</button>
             <button class="seg-btn btn-speed" data-speed="1.0">1.0&times;</button>
             <button class="seg-btn btn-speed" data-speed="0.5">0.5&times;</button>
-            <button class="seg-btn btn-speed active" data-speed="0.25">0.25&times; (슬로우)</button>
-            <button class="seg-btn btn-speed" data-speed="0.1">0.1&times; (초슬로우)</button>
+            <button class="seg-btn btn-speed active" data-speed="0.25">0.25&times;</button>
+            <button class="seg-btn btn-speed" data-speed="0.1">0.1&times;</button>
           </div>
           <div style="display: flex; gap: 6px;">
             <button id="btn-step-prev" class="btn btn-ghost btn-xs" style="color:#fff; border-color:#334155;">◀ 1프레임</button>
