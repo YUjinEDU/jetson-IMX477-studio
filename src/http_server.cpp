@@ -595,8 +595,16 @@ bool HttpServer::start() {
             res.set_content("{\"error\":\"missing path\"}", "application/json");
             return;
         }
-        std::string path = req.get_param_value("path");
-        cv::VideoCapture cap(path);
+        std::string raw_path = req.get_param_value("path");
+        std::filesystem::path p(raw_path);
+        std::string filename = p.filename().string();
+        if (filename.empty() || raw_path.find("..") != std::string::npos) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid filename\"}", "application/json");
+            return;
+        }
+        std::string safe_path = "recordings/" + filename;
+        cv::VideoCapture cap(safe_path);
         if (!cap.isOpened()) {
             res.status = 404;
             res.set_content("{\"error\":\"cannot open video clip\"}", "application/json");
@@ -607,7 +615,8 @@ bool HttpServer::start() {
         int w = (int)cap.get(cv::CAP_PROP_FRAME_WIDTH);
         int h = (int)cap.get(cv::CAP_PROP_FRAME_HEIGHT);
         json info = {
-            {"path", path},
+            {"path", raw_path},
+            {"filename", filename},
             {"fps", fps > 0 ? fps : 30.0},
             {"total_frames", total},
             {"width", w},
@@ -620,15 +629,29 @@ bool HttpServer::start() {
     impl_->svr.Get("/api/clip/frame", [](const httplib::Request& req, httplib::Response& res) {
         if (!req.has_param("path")) {
             res.status = 400;
-            res.set_content("{\"error\":\"missing path\"}", "application/json");
+            res.set_content("missing path", "text/plain");
             return;
         }
-        std::string path = req.get_param_value("path");
+        std::string raw_path = req.get_param_value("path");
+        std::filesystem::path p(raw_path);
+        std::string filename = p.filename().string();
+        if (filename.empty() || raw_path.find("..") != std::string::npos) {
+            res.status = 400;
+            res.set_content("invalid filename", "text/plain");
+            return;
+        }
+        std::string safe_path = "recordings/" + filename;
         int frame_idx = 0;
         if (req.has_param("frame")) {
-            frame_idx = std::max(0, std::stoi(req.get_param_value("frame")));
+            try {
+                frame_idx = std::max(0, std::stoi(req.get_param_value("frame")));
+            } catch (...) {
+                res.status = 400;
+                res.set_content("invalid frame index", "text/plain");
+                return;
+            }
         }
-        cv::VideoCapture cap(path);
+        cv::VideoCapture cap(safe_path);
         if (!cap.isOpened()) {
             res.status = 404;
             res.set_content("cannot open video", "text/plain");
