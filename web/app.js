@@ -12,7 +12,14 @@
   const hudRes = document.getElementById('hud-res');
   const hudSensor = document.getElementById('hud-sensor');
   const hudFps = document.getElementById('hud-fps');
+  const hudAi = document.getElementById('hud-ai');
   const hudZoom = document.getElementById('hud-zoom');
+  const badgeAi = document.getElementById('badge-ai');
+  const badgeRec = document.getElementById('badge-rec');
+  const metricViewFps = document.getElementById('metric-view-fps');
+  const fpsGraphTitle = document.getElementById('fps-graph-title');
+  const btnPresetIndoor = document.getElementById('btn-preset-indoor');
+  const btnPresetPitch = document.getElementById('btn-preset-pitch');
   const toast = document.getElementById('toast');
   const shutterFlash = document.getElementById('shutter-flash');
   const minimapBox = document.getElementById('minimap-box');
@@ -95,6 +102,7 @@
   const replayTimeText = document.getElementById('replay-time-text');
   const btnStepPrev = document.getElementById('btn-step-prev');
   const btnStepNext = document.getElementById('btn-step-next');
+  const replayCsvBtn = document.getElementById('replay-csv-btn');
 
   let currentReplayClip = null;
   let currentReplayFrame = 0;
@@ -127,6 +135,11 @@
   const selectPitchPostroll = document.getElementById('select-pitch-postroll');
   const valPitchClipsCount = document.getElementById('val-pitch-clips-count');
   const pitchClipStatusBadge = document.getElementById('pitch-clip-status-badge');
+  const valPitchBuffered = document.getElementById('val-pitch-buffered');
+  const pitchBufferReadiness = document.getElementById('pitch-buffer-readiness');
+  const pitchBufferFill = document.getElementById('pitch-buffer-fill');
+  const pitchNativeSpec = document.getElementById('pitch-native-spec');
+  const pitchErrorAlert = document.getElementById('pitch-error-alert');
   // Calibration Elements
   const btnCalibCapture = document.getElementById('btn-calib-capture');
   const btnCalibCompute = document.getElementById('btn-calib-compute');
@@ -158,6 +171,9 @@
   let activeHeight = 990;
   let pendingControls = {};
   let pendingDisplay = {};
+  let activeSensorMode = 2;
+  let currentTargetFps = 120;
+  let isApplyingPreset = false;
   // --- Stream Auto-Reconnect & Fallback Loop ---
   let isFallbackLoopRunning = false;
   let fallbackGeneration = 0;
@@ -383,14 +399,215 @@
     });
   });
 
+  // --- Dynamic Target FPS & Telemetry HUD ---
+  function updateTargetFpsUI(targetFps) {
+    if (typeof targetFps === 'number' && targetFps > 0) {
+      currentTargetFps = targetFps;
+    }
+    if (fpsGraphTitle) {
+      fpsGraphTitle.textContent = `⚡ ${Math.round(currentTargetFps)} FPS 성능 안정성 (60초 히스토리)`;
+    }
+  }
+
+  // --- Truthful Native Recording Telemetry ---
+  function updateRecordingUI(rec) {
+    if (!rec) return;
+    const isRec = !!rec.recording;
+    const wasRecording = isRecording;
+    isRecording = isRec;
+
+    if (btnRecord) {
+      btnRecord.classList.toggle('is-recording', isRec);
+    }
+    if (recLabel) {
+      recLabel.textContent = isRec ? '센서 원본 정지' : '센서 원본 REC';
+    }
+
+    if (isRec && !wasRecording) {
+      recordSeconds = 0;
+      updateRecordTimerDisplay();
+      if (recTimer) recTimer.style.display = 'inline';
+      if (!recordTimerInterval) {
+        recordTimerInterval = setInterval(() => {
+          recordSeconds++;
+          updateRecordTimerDisplay();
+        }, 1000);
+      }
+    } else if (!isRec && wasRecording) {
+      if (recTimer) recTimer.style.display = 'none';
+      if (recordTimerInterval) {
+        clearInterval(recordTimerInterval);
+        recordTimerInterval = null;
+      }
+    }
+
+    // Header REC status badge
+    if (badgeRec) {
+      if (rec.error) {
+        badgeRec.className = 'pill pill-danger';
+        badgeRec.textContent = `REC 에러: ${rec.error}`;
+        badgeRec.title = `센서 원본 녹화 에러: ${rec.error}`;
+      } else if (isRec) {
+        badgeRec.className = 'pill pill-rec-active';
+        const fpsVal = rec.actual_fps > 0 ? rec.actual_fps.toFixed(1) : (rec.fps || currentTargetFps);
+        const drops = rec.dropped_frames || 0;
+        badgeRec.textContent = `● 센서 원본 REC (${rec.width || activeWidth}×${rec.height || activeHeight} @ ${fpsVal}fps)`;
+        badgeRec.title = `센서 원본 무손실 녹화 중: ${rec.frames || 0} 프레임, 드롭 ${drops}개 (${rec.path || ''})`;
+      } else {
+        badgeRec.className = 'pill pill-muted';
+        badgeRec.textContent = '센서 원본 REC 대기';
+        badgeRec.title = '센서 원본 고속 레코더 대기 중';
+      }
+    }
+
+    // Viewport OSD rec badge
+    if (osdRecBadge) {
+      if (isRec) {
+        osdRecBadge.style.display = 'block';
+        const fpsVal = rec.actual_fps > 0 ? rec.actual_fps.toFixed(1) : (rec.fps || currentTargetFps);
+        const drops = rec.dropped_frames || 0;
+        osdRecBadge.textContent = `● 센서 원본 REC | ${rec.width || activeWidth}×${rec.height || activeHeight} @ ${fpsVal} FPS | 드롭 ${drops}`;
+        osdRecBadge.style.background = drops > 0 ? 'rgba(239, 68, 68, 0.95)' : 'rgba(220, 38, 38, 0.9)';
+      } else {
+        osdRecBadge.style.display = 'none';
+      }
+    }
+  }
+
+  // --- AI Stream & Heartbeat Telemetry ---
+  function updateAiUI(ai) {
+    if (!badgeAi && !hudAi) return;
+    const isMode2 = (activeSensorMode === 2);
+    const enabled = isMode2 && ai && ai.enabled;
+    const readerActive = enabled && ai.reader_active;
+
+    if (!enabled) {
+      if (badgeAi) {
+        badgeAi.className = 'pill pill-muted';
+        badgeAi.textContent = 'AI: OFF';
+        badgeAi.title = 'AI 스트림 꺼짐 (모드2 1332×990 @ 120fps 전용)';
+      }
+      if (hudAi) hudAi.textContent = 'AI: OFF';
+    } else if (!readerActive) {
+      if (badgeAi) {
+        badgeAi.className = 'pill pill-ready';
+        badgeAi.textContent = 'AI: READY (SHM)';
+        badgeAi.title = `AI 공유메모리(${ai.shm_name || '/dev/shm'}) 준비 완료, 외부 판독기 연결 대기`;
+      }
+      if (hudAi) hudAi.textContent = 'AI: READY';
+    } else {
+      if (badgeAi) {
+        badgeAi.className = 'pill pill-active';
+        badgeAi.textContent = 'AI: ACTIVE (수신)';
+        badgeAi.title = `외부 판독기 하트비트 수신 중 (주의: 판독기 프로세스 연결 하트비트이며 모델 추론 성공 여부가 아닙니다)`;
+      }
+      if (hudAi) hudAi.textContent = 'AI: ACTIVE';
+    }
+  }
+
+  // --- One-Click Preset Apply Handler ---
+  async function applyPreset(name, isPurpose = false) {
+    if (!name || isApplyingPreset || isSwitchingSensorMode) return;
+    isApplyingPreset = true;
+
+    // Cancel pending debounced old control/display posts
+    if (postControlsTimer) {
+      clearTimeout(postControlsTimer);
+      postControlsTimer = null;
+    }
+    pendingControls = {};
+    if (postDisplayTimer) {
+      clearTimeout(postDisplayTimer);
+      postDisplayTimer = null;
+    }
+    pendingDisplay = {};
+
+    // Disable conflicting mode/purpose buttons
+    sensorModeBtns.forEach(b => { b.disabled = true; b.style.pointerEvents = 'none'; });
+    if (btnPresetIndoor) btnPresetIndoor.disabled = true;
+    if (btnPresetPitch) btnPresetPitch.disabled = true;
+    if (btnLoadPreset) btnLoadPreset.disabled = true;
+
+    showToast(`프리셋 적용 중: ${name}...`);
+
+    try {
+      const res = await fetch(`/api/presets/${encodeURIComponent(name)}/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.status === 'error') {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+
+      applyStateToUI(data);
+      if (data.recording_status) updateRecordingUI(data.recording_status);
+      if (data.ai_status) updateAiUI(data.ai_status);
+
+      const activeMode = data.mode !== undefined ? data.mode : data.capabilities?.active_sensor_mode;
+      if (activeMode !== undefined) {
+        activeSensorMode = activeMode;
+        sensorModeBtns.forEach(b => b.classList.toggle('active', parseInt(b.dataset.sensorMode, 10) === activeMode));
+      }
+      if (data.target_fps) {
+        updateTargetFpsUI(data.target_fps);
+      }
+
+      if (btnPresetIndoor) btnPresetIndoor.classList.toggle('active', name === 'indoor-preview');
+      if (btnPresetPitch) btnPresetPitch.classList.toggle('active', name === 'pitch-ai-120fps');
+
+      if (name === 'pitch-ai-120fps') {
+        showToast('투구·AI 120fps 적용됨 (1ms 셔터는 충분한 조명이 필요하며 AI 판독기는 별도 연결됩니다)');
+      } else if (name === 'indoor-preview') {
+        showToast('실내 확인 적용됨 (1080p 60fps / 8ms 노출)');
+      } else {
+        showToast(`프리셋 적용 완료: ${name}`);
+      }
+
+      reloadStream();
+    } catch (err) {
+      console.error('Failed to apply preset:', err);
+      showToast(`프리셋 적용 실패: ${err.message || err}`);
+    } finally {
+      isApplyingPreset = false;
+      sensorModeBtns.forEach(b => { b.disabled = false; b.style.pointerEvents = ''; });
+      if (btnPresetIndoor) btnPresetIndoor.disabled = false;
+      if (btnPresetPitch) btnPresetPitch.disabled = false;
+      if (btnLoadPreset) btnLoadPreset.disabled = false;
+    }
+  }
+
+  if (btnPresetIndoor) {
+    btnPresetIndoor.addEventListener('click', () => applyPreset('indoor-preview', true));
+  }
+  if (btnPresetPitch) {
+    btnPresetPitch.addEventListener('click', () => applyPreset('pitch-ai-120fps', true));
+  }
+
   // --- Sensor Mode Switching (4K 30P / 1080 60P / 990 120P) ---
   let isSwitchingSensorMode = false;
   sensorModeBtns.forEach(btn => {
     btn.addEventListener('click', () => {
-      if (isSwitchingSensorMode) return;
+      if (isSwitchingSensorMode || isApplyingPreset) return;
       const mode = parseInt(btn.dataset.sensorMode, 10);
       isSwitchingSensorMode = true;
+
+      // Cancel pending debounced posts
+      if (postControlsTimer) {
+        clearTimeout(postControlsTimer);
+        postControlsTimer = null;
+      }
+      pendingControls = {};
+      if (postDisplayTimer) {
+        clearTimeout(postDisplayTimer);
+        postDisplayTimer = null;
+      }
+      pendingDisplay = {};
+
       sensorModeBtns.forEach(b => b.style.pointerEvents = 'none');
+      if (btnPresetIndoor) btnPresetIndoor.disabled = true;
+      if (btnPresetPitch) btnPresetPitch.disabled = true;
+
       showToast(`Switching to sensor mode ${mode}...`);
       fetch('/api/sensor_mode', {
         method: 'POST',
@@ -405,9 +622,14 @@
         return d;
       })
       .then(d => {
+        activeSensorMode = mode;
         sensorModeBtns.forEach(b => b.classList.toggle('active', parseInt(b.dataset.sensorMode, 10) === mode));
+        if (btnPresetIndoor) btnPresetIndoor.classList.toggle('active', mode === 1);
+        if (btnPresetPitch) btnPresetPitch.classList.toggle('active', mode === 2);
+
         hudRes.textContent = `${d.width}×${d.height}`;
         hudSensor.textContent = `${d.target_fps.toFixed(0)} FPS`;
+        updateTargetFpsUI(d.target_fps);
         showToast(`Active: ${d.width}×${d.height} @ ${d.target_fps} FPS`);
         // Re-fetch state for new exposure limits
         fetch('/api/state').then(r => r.json()).then(applyStateToUI).catch(console.error);
@@ -417,6 +639,8 @@
       .finally(() => {
         isSwitchingSensorMode = false;
         sensorModeBtns.forEach(b => b.style.pointerEvents = '');
+        if (btnPresetIndoor) btnPresetIndoor.disabled = false;
+        if (btnPresetPitch) btnPresetPitch.disabled = false;
       });
     });
   });
@@ -434,37 +658,23 @@
         .then(r => r.json())
         .then(d => {
           if (d.status === 'ok') {
-            isRecording = true;
-            btnRecord.classList.add('is-recording');
-            recLabel.textContent = 'STOP';
-            recTimer.style.display = 'inline';
-            if (osdRecBadge) osdRecBadge.style.display = 'block';
-            recordSeconds = 0;
-            updateRecordTimerDisplay();
-            recordTimerInterval = setInterval(() => {
-              recordSeconds++;
-              updateRecordTimerDisplay();
-            }, 1000);
-            showToast(`● Recording started: ${d.path}`);
+            updateRecordingUI(d.recording_status || d);
+            showToast(`● 센서 원본 녹화 시작: ${d.path || ''}`);
           } else {
-            showToast(`Record start failed: ${d.error || 'Error'}`);
+            showToast(`녹화 시작 실패: ${d.error || '알 수 없는 오류'}`);
           }
         })
-        .catch(e => showToast(`Record error: ${e}`));
+        .catch(e => showToast(`녹화 오류: ${e.message || e}`));
     } else {
       fetch('/api/record/stop', { method: 'POST' })
         .then(r => r.json())
         .then(d => {
-          isRecording = false;
-          btnRecord.classList.remove('is-recording');
-          recLabel.textContent = 'REC';
-          recTimer.style.display = 'none';
-          if (osdRecBadge) osdRecBadge.style.display = 'none';
-          clearInterval(recordTimerInterval);
-          showToast(`■ Video saved: ${d.path} (${d.frames} frames)`);
+          updateRecordingUI(d.recording_status || { recording: false, frames: d.frames });
+          const dropMsg = (d.dropped_frames || (d.recording_status && d.recording_status.dropped_frames)) ? ` (드롭: ${d.dropped_frames || d.recording_status.dropped_frames})` : '';
+          showToast(`■ 센서 원본 저장 완료: ${d.path || ''} (${d.frames || 0} frames${dropMsg})`);
           loadMediaGallery();
         })
-        .catch(e => showToast(`Record error: ${e}`));
+        .catch(e => showToast(`녹화 오류: ${e.message || e}`));
     }
   }
   if (btnRecord) btnRecord.addEventListener('click', toggleRecording);
@@ -593,7 +803,58 @@
     });
   }
 
-  // --- Pitch Auto-Clip Handlers ---
+  // --- Pitch Auto-Clip Handlers & Readiness ---
+  function updatePitchStatusUI(d) {
+    if (!d) return;
+    const motion = d.current_motion_level !== undefined ? d.current_motion_level : (d.motion_level || 0);
+    if (valPitchMotion) valPitchMotion.textContent = `${motion} %`;
+    if (pitchMotionFill) pitchMotionFill.style.width = `${Math.min(100, motion)}%`;
+    if (valPitchClipsCount) valPitchClipsCount.textContent = d.total_clips !== undefined ? d.total_clips : 0;
+    if (pitchClipStatusBadge) {
+      if (d.is_clipping) {
+        pitchClipStatusBadge.textContent = '● 클립 녹화 중 (CLIPPING)';
+        pitchClipStatusBadge.className = 'pill pill-danger';
+      } else {
+        pitchClipStatusBadge.textContent = '대기 중 (IDLE)';
+        pitchClipStatusBadge.className = 'pill pill-muted';
+      }
+    }
+
+    // Native pre-roll buffer readiness
+    const reqPreRoll = (selectPitchPreroll && parseFloat(selectPitchPreroll.value)) || 1.5;
+    const bufSec = typeof d.buffered_sec === 'number' ? d.buffered_sec : 0;
+    if (valPitchBuffered) {
+      valPitchBuffered.textContent = `${bufSec.toFixed(1)}s / ${reqPreRoll.toFixed(1)}s`;
+    }
+    if (pitchBufferFill) {
+      const pct = Math.min(100, Math.round((bufSec / reqPreRoll) * 100));
+      pitchBufferFill.style.width = `${pct}%`;
+    }
+    if (pitchBufferReadiness) {
+      if (bufSec >= reqPreRoll * 0.9) {
+        pitchBufferReadiness.textContent = '버퍼 준비 완료 (READY)';
+        pitchBufferReadiness.className = 'pill pill-success';
+      } else {
+        pitchBufferReadiness.textContent = '버퍼 충전 중...';
+        pitchBufferReadiness.className = 'pill pill-ready';
+      }
+    }
+    if (pitchNativeSpec) {
+      const w = d.width || activeWidth;
+      const h = d.height || activeHeight;
+      const fps = d.fps ? d.fps.toFixed(0) : currentTargetFps.toFixed(0);
+      pitchNativeSpec.textContent = `${w}×${h} @ ${fps} FPS`;
+    }
+    if (pitchErrorAlert) {
+      if (d.error) {
+        pitchErrorAlert.style.display = 'block';
+        pitchErrorAlert.textContent = `피치 에러: ${d.error}`;
+      } else {
+        pitchErrorAlert.style.display = 'none';
+      }
+    }
+  }
+
   function updatePitchConfig() {
     if (!chkPitchAutoClip) return;
     const cfg = {
@@ -616,29 +877,15 @@
   if (selectPitchPostroll) selectPitchPostroll.addEventListener('change', updatePitchConfig);
 
   setInterval(() => {
-    if (!chkPitchAutoClip || !chkPitchAutoClip.checked) return;
     fetch('/api/pitch/status')
       .then(r => r.json())
-      .then(d => {
-        if (valPitchMotion) valPitchMotion.textContent = `${d.motion_level} %`;
-        if (pitchMotionFill) pitchMotionFill.style.width = `${Math.min(100, d.motion_level)}%`;
-        if (valPitchClipsCount) valPitchClipsCount.textContent = d.total_clips;
-        if (pitchClipStatusBadge) {
-          if (d.is_clipping) {
-            pitchClipStatusBadge.textContent = '● 클립 녹화 중 (CLIPPING)';
-            pitchClipStatusBadge.className = 'pill pill-danger';
-          } else {
-            pitchClipStatusBadge.textContent = '대기 중 (IDLE)';
-            pitchClipStatusBadge.className = 'pill pill-muted';
-          }
-        }
-      })
+      .then(updatePitchStatusUI)
       .catch(() => {});
-  }, 250);
+  }, 350);
 
   // --- Telemetry Drawing (Sparkline & Histogram) ---
   function drawSparkline(val) {
-    if (!sparklineCtx) return;
+    if (!sparklineCtx || !sparklineCanvas) return;
     if (val > 0) {
       fpsHistory.push(val);
       if (fpsHistory.length > 60) fpsHistory.shift();
@@ -650,8 +897,9 @@
     sparklineCtx.fillStyle = '#edf1f5';
     sparklineCtx.fillRect(0, 0, w, h);
 
-    // Target FPS horizontal guideline
-    const targetY = h - (120.0 / 140.0) * h;
+    // Target FPS horizontal guideline matching currentTargetFps
+    const maxScale = Math.max(currentTargetFps * 1.2, 35.0);
+    const targetY = h - (currentTargetFps / maxScale) * (h - 6) - 3;
     sparklineCtx.strokeStyle = 'rgba(16, 185, 129, 0.5)';
     sparklineCtx.lineWidth = 1;
     sparklineCtx.setLineDash([3, 3]);
@@ -667,11 +915,11 @@
     const offset = 60 - fpsHistory.length;
     for (let i = 0; i < fpsHistory.length; i++) {
       const x = (offset + i) * step;
-      const y = h - Math.min(1.0, Math.max(0.0, fpsHistory[i] / 140.0)) * (h - 4);
+      const y = h - Math.min(1.0, Math.max(0.0, fpsHistory[i] / maxScale)) * (h - 6) - 3;
       if (i === 0) sparklineCtx.moveTo(x, y);
       else sparklineCtx.lineTo(x, y);
     }
-    sparklineCtx.strokeStyle = '#0284c7';
+    sparklineCtx.strokeStyle = val < (currentTargetFps * 0.9) ? '#ef4444' : '#0284c7';
     sparklineCtx.lineWidth = 1.5;
     sparklineCtx.stroke();
 
@@ -733,8 +981,12 @@
       if (caps.width && caps.height && hudRes) hudRes.textContent = `${caps.width}×${caps.height}`;
       if (caps.width) activeWidth = caps.width;
       if (caps.height) activeHeight = caps.height;
-      if (caps.target_fps && hudSensor) hudSensor.textContent = `${caps.target_fps.toFixed(0)} FPS`;
+      if (caps.target_fps) {
+        updateTargetFpsUI(caps.target_fps);
+        if (hudSensor) hudSensor.textContent = `${caps.target_fps.toFixed(0)} FPS`;
+      }
       if (caps.active_sensor_mode !== undefined) {
+        activeSensorMode = caps.active_sensor_mode;
         sensorModeBtns.forEach(b => b.classList.toggle('active', parseInt(b.dataset.sensorMode, 10) === caps.active_sensor_mode));
       }
       if (caps.max_exposure_us && rangeExp) {
@@ -742,6 +994,19 @@
       }
     }
 
+    if (state.mode !== undefined) {
+      activeSensorMode = state.mode;
+      sensorModeBtns.forEach(b => b.classList.toggle('active', parseInt(b.dataset.sensorMode, 10) === state.mode));
+    }
+    if (state.target_fps !== undefined) {
+      updateTargetFpsUI(state.target_fps);
+    }
+    if (state.recording_status) {
+      updateRecordingUI(state.recording_status);
+    }
+    if (state.ai_status) {
+      updateAiUI(state.ai_status);
+    }
     if (ctrl) {
       if (ctrl.auto_exposure !== undefined) {
         const radio = document.querySelector(`input[name="ae-mode"][value="${ctrl.auto_exposure ? 'auto' : 'manual'}"]`);
@@ -827,6 +1092,10 @@
 
         if (cm) {
           if (metricSensorFps) metricSensorFps.textContent = cm.sensor_fps > 0 ? cm.sensor_fps.toFixed(1) : '--';
+          if (hudSensor) {
+            const fpsVal = cm.sensor_fps > 0 ? cm.sensor_fps.toFixed(1) : (currentTargetFps || 120).toFixed(0);
+            hudSensor.textContent = `${fpsVal} FPS`;
+          }
           if (metricGaps) metricGaps.textContent = cm.sequence_gaps || 0;
           if (metricTotalFrames) metricTotalFrames.textContent = (cm.total_frames || 0).toLocaleString();
           if (metricUptime && cm.uptime_ms) {
@@ -845,6 +1114,7 @@
 
         if (dm) {
           if (hudFps) hudFps.textContent = (dm.display_fps || 0).toFixed(0) + ' FPS VIEW';
+          if (metricViewFps) metricViewFps.textContent = (dm.display_fps || 0).toFixed(0);
           if (dm.focus_score !== undefined) {
             const score = Math.round(dm.focus_score);
             if (focusScoreVal) focusScoreVal.textContent = score;
@@ -856,6 +1126,13 @@
           if (dm.histogram_64) {
             drawHistogram(dm.histogram_64);
           }
+        }
+
+        if (d.recording_status) {
+          updateRecordingUI(d.recording_status);
+        }
+        if (d.ai_status) {
+          updateAiUI(d.ai_status);
         }
       } catch (err) {
         console.error('SSE parse error:', err);
@@ -916,17 +1193,23 @@
       }
 
       galleryContainer.innerHTML = '';
-      items.reverse().slice(0, 16).forEach(item => {
+      items.sort((a, b) => (b.filename || '').localeCompare(a.filename || '')).slice(0, 16).forEach(item => {
         const card = document.createElement('div');
         card.className = 'gallery-card';
         const isVid = item.type === 'video';
+        const metaCsvHtml = item.metadata_url
+          ? `<a href="${item.metadata_url}" download class="gallery-csv-link" title="센서 타임스탬프 CSV 다운로드">CSV 메타데이터</a>`
+          : '';
         card.innerHTML = `
-          <a href="${item.url}" class="${isVid ? 'replay-link' : ''}" data-url="${item.url}" data-name="${item.filename}" ${isVid ? '' : 'target="_blank"'}>
+          <a href="${item.url}" class="${isVid ? 'replay-link' : ''}" data-url="${item.url}" data-name="${item.filename}" data-meta="${item.metadata_url || ''}" ${isVid ? '' : 'target="_blank"'}>
             ${isVid ? `<div style="height:90px;background:#0f172a;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;cursor:pointer;">▶ SLOW-MO REPLAY</div>` : `<img src="${item.url}" alt="${item.filename}" loading="lazy">`}
           </a>
           <div class="gallery-meta">
-            <span class="${isVid ? 'replay-link' : ''}" data-url="${item.url}" data-name="${item.filename}" style="${isVid ? 'cursor:pointer;color:var(--accent);font-weight:700;' : ''}">${item.filename.length > 20 ? item.filename.substring(0, 18) + '..' : item.filename}</span>
-            <a href="${item.url}" download style="color:var(--accent);text-decoration:none;font-weight:700;">Save</a>
+            <span class="${isVid ? 'replay-link' : ''}" data-url="${item.url}" data-name="${item.filename}" data-meta="${item.metadata_url || ''}" style="${isVid ? 'cursor:pointer;color:var(--accent);font-weight:700;' : ''}">${item.filename.length > 20 ? item.filename.substring(0, 18) + '..' : item.filename}</span>
+            <div style="display:flex;gap:6px;align-items:center;">
+              ${metaCsvHtml}
+              <a href="${item.url}" download style="color:var(--accent);text-decoration:none;font-weight:700;">Save</a>
+            </div>
           </div>
         `;
         galleryContainer.appendChild(card);
@@ -935,7 +1218,7 @@
       document.querySelectorAll('.replay-link').forEach(link => {
         link.addEventListener('click', (e) => {
           e.preventDefault();
-          openReplayModal(link.dataset.url, link.dataset.name);
+          openReplayModal(link.dataset.url, link.dataset.name, link.dataset.meta);
         });
       });
     }).catch(console.error);
@@ -1051,13 +1334,14 @@
   }
 
   function updateReplayLabels(frameIdx, totalFrames, fps, durationSec) {
+    const validFps = (typeof fps === 'number' && fps > 0) ? fps : 30;
+    const deltaMs = (1000.0 / validFps).toFixed(1);
     if (replayFrameText) {
-      replayFrameText.textContent = `Frame ${frameIdx + 1} / ${totalFrames}`;
+      replayFrameText.textContent = `Frame ${frameIdx + 1} / ${totalFrames} (Δ ${deltaMs}ms)`;
     }
     if (replayTimeText) {
-      const validFps = (typeof fps === 'number' && fps > 0) ? fps : 30;
-      const curSec = (frameIdx / validFps).toFixed(2);
-      const durSec = (typeof durationSec === 'number' && durationSec > 0) ? durationSec.toFixed(2) : (totalFrames / validFps).toFixed(2);
+      const curSec = (frameIdx / validFps).toFixed(3);
+      const durSec = (typeof durationSec === 'number' && durationSec > 0) ? durationSec.toFixed(3) : (totalFrames / validFps).toFixed(3);
       replayTimeText.textContent = `${curSec}s / ${durSec}s (${validFps.toFixed(0)} FPS)`;
     }
   }
@@ -1180,18 +1464,18 @@
     requestFramePresentation(idx);
   }
 
-  async function pumpPrefetch() {
+  async function pumpPrefetch(step = 1) {
     if (prefetchWorkerRunning || !currentReplayClip || !replayPlaying) return;
     prefetchWorkerRunning = true;
     try {
       const clip = currentReplayClip;
       const session = replaySessionCounter;
-      const PREFETCH_AHEAD = 4;
+      const PREFETCH_AHEAD = Math.max(4, step * 4);
 
       while (replayPlaying && session === replaySessionCounter && currentReplayClip === clip) {
         let targetIdx = -1;
         for (let i = 1; i <= PREFETCH_AHEAD; i++) {
-          const idx = (currentReplayFrame + i) % clip.total_frames;
+          const idx = (currentReplayFrame + (i * step)) % clip.total_frames;
           if (!replayCache.has(idx) && !inFlightRequests.has(idx)) {
             targetIdx = idx;
             break;
@@ -1225,13 +1509,23 @@
     const session = replaySessionCounter;
     const epoch = replayPlaybackEpoch;
 
-    const targetFps = Math.max(1, (clip.fps || 30) * replaySpeed);
-    const targetIntervalMs = Math.max(16, Math.round(1000.0 / targetFps));
+    const clipFps = (clip.fps && clip.fps > 0) ? clip.fps : 30;
+    const effectiveFps = Math.max(1, clipFps * replaySpeed);
 
-    let next = currentReplayFrame + 1;
-    if (next >= clip.total_frames) {
-      next = 0; // loop
+    // Browser display refresh limit (e.g. 60 FPS) to maintain real time at 1.0x 120fps
+    const maxDisplayFps = 60;
+    let frameStep = 1;
+    let targetIntervalMs;
+
+    if (effectiveFps <= maxDisplayFps) {
+      frameStep = 1;
+      targetIntervalMs = 1000.0 / effectiveFps;
+    } else {
+      frameStep = Math.max(1, Math.round(effectiveFps / maxDisplayFps));
+      targetIntervalMs = 1000.0 / (effectiveFps / frameStep);
     }
+
+    let next = (currentReplayFrame + frameStep) % clip.total_frames;
 
     const startTime = performance.now();
     const ok = await presentFrame(next, true);
@@ -1241,6 +1535,7 @@
     const elapsed = performance.now() - startTime;
     const remainingDelay = Math.max(0, targetIntervalMs - elapsed);
 
+    pumpPrefetch(frameStep);
     scheduleNextPlaybackTick(remainingDelay);
   }
 
@@ -1280,13 +1575,17 @@
     if (replayFrame) {
       replayFrame.removeAttribute('src');
     }
+    if (replayCsvBtn) {
+      replayCsvBtn.style.display = 'none';
+      replayCsvBtn.removeAttribute('href');
+    }
     currentReplayClip = null;
     if (replayModal) {
       replayModal.style.display = 'none';
     }
   }
 
-  function openReplayModal(path, title) {
+  function openReplayModal(path, title, metaUrl) {
     if (!replayModal) return;
     const session = ++replaySessionCounter;
     pauseReplayPlayback();
@@ -1311,7 +1610,17 @@
       replayScrubber.value = 0;
     }
     if (replayFrameText) replayFrameText.textContent = 'Loading...';
-    if (replayTimeText) replayTimeText.textContent = '0.00s / 0.00s';
+    if (replayTimeText) replayTimeText.textContent = '0.000s / 0.000s';
+    if (replayCsvBtn) {
+      if (metaUrl) {
+        replayCsvBtn.href = metaUrl;
+        replayCsvBtn.style.display = 'inline-flex';
+        replayCsvBtn.title = `CSV 메타데이터 다운로드: ${metaUrl}`;
+      } else {
+        replayCsvBtn.style.display = 'none';
+        replayCsvBtn.removeAttribute('href');
+      }
+    }
     replayModal.style.display = 'flex';
 
     replayInfoAbort = new AbortController();
@@ -1332,10 +1641,24 @@
         }
         currentReplayClip = info;
         currentReplayFrame = 0;
+
+        const csvUrl = info.metadata_url || metaUrl;
+        if (replayCsvBtn) {
+          if (csvUrl) {
+            replayCsvBtn.href = csvUrl;
+            replayCsvBtn.style.display = 'inline-flex';
+            replayCsvBtn.title = `CSV 메타데이터 다운로드: ${csvUrl}`;
+          } else {
+            replayCsvBtn.style.display = 'none';
+            replayCsvBtn.removeAttribute('href');
+          }
+        }
+
         if (replayScrubber) {
           replayScrubber.disabled = false;
           replayScrubber.min = 0;
           replayScrubber.max = info.total_frames - 1;
+          replayScrubber.step = 1;
           replayScrubber.value = 0;
         }
         presentFrame(0, false).then(ok => {
@@ -1568,17 +1891,9 @@
 
   if (btnLoadPreset) {
     btnLoadPreset.addEventListener('click', () => {
-      const name = presetSelect.value;
+      const name = presetSelect ? presetSelect.value : '';
       if (!name) return;
-      fetch(`/api/presets/${encodeURIComponent(name)}`)
-        .then(r => r.json())
-        .then(data => {
-          applyStateToUI(data);
-          if (data.controls) postControls(data.controls);
-          if (data.display) postDisplay(data.display);
-          showToast(`Loaded preset: ${name}`);
-        })
-        .catch(e => showToast('Failed to load preset: ' + e));
+      applyPreset(name);
     });
   }
 
@@ -1591,6 +1906,7 @@
         .then(state => {
           const payload = {
             description: 'User saved preset',
+            sensor_mode: state.capabilities?.active_sensor_mode !== undefined ? state.capabilities.active_sensor_mode : activeSensorMode,
             controls: state.controls,
             display: state.display_settings
           };
@@ -1614,11 +1930,11 @@
 
   // --- Initial Launch ---
   fetch('/api/state').then(r => r.json()).then(applyStateToUI).catch(console.error);
+  fetch('/api/pitch/status').then(r => r.json()).then(updatePitchStatusUI).catch(() => {});
   setupSSE();
   updateBlurCalculator();
   loadPresetList();
   loadMediaGallery();
-
   if (window.location.hash) {
     const initTab = document.querySelector(`.itab-btn[data-tab="${window.location.hash.substring(1)}"]`);
     if (initTab) initTab.click();

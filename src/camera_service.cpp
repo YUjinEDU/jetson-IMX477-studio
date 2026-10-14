@@ -73,6 +73,13 @@ struct CameraService::Impl {
     NvBufSurface* disp_surface{nullptr};
     uint64_t disp_seq{0};
     uint64_t disp_sensor_ts{0};
+    // Native sensor recorder state
+    std::mutex rec_mu;
+    SensorRecorder recorder;
+    int rec_buf_fd{-1};
+    NvBufSurface* rec_surface{nullptr};
+    std::vector<uint8_t> rec_linear_buf;
+
 
     // SHM writer state
     int shm_fd{-1};
@@ -350,6 +357,17 @@ void CameraService::stop() {
         }
         impl_->disp_buf_fd = -1;
     }
+    {
+        std::lock_guard<std::mutex> rlock(impl_->rec_mu);
+        impl_->recorder.stop();
+        if (impl_->rec_surface) {
+            NvBufSurfaceUnMap(impl_->rec_surface, 0, -1);
+            NvBufSurfaceDestroy(impl_->rec_surface);
+            impl_->rec_surface = nullptr;
+        }
+        impl_->rec_buf_fd = -1;
+        impl_->rec_linear_buf.clear();
+    }
 
     if (impl_->ai_surface) {
         NvBufSurfaceUnMap(impl_->ai_surface, 0, -1);
@@ -534,25 +552,91 @@ void CameraService::Impl::main_loop(std::atomic<bool>& running) {
             prev_ts = sensor_ts;
         }
 
-        // Display copy handshake
+        // 1. Full-rate native sensor recording
+        bool rec_active = false;
+        {
+            std::lock_guard<std::mutex> rlock(rec_mu);
+            rec_active = recorder.is_recording();
+        }
+        if (rec_active) {
+            auto native = interface_cast<NV::IImageNativeBuffer>(f->getImage());
+            if (native) {
+                if (rec_buf_fd < 0) {
+                    rec_buf_fd = native->createNvBuffer(Size2D<uint32_t>(caps.width, caps.height),
+                                                        NVBUF_COLOR_FORMAT_NV12,
+                                                        NVBUF_LAYOUT_PITCH);
+                    NvBufSurfaceFromFd(rec_buf_fd, (void**)&rec_surface);
+                    NvBufSurfaceMap(rec_surface, 0, -1, NVBUF_MAP_READ);
+                }
+                native->copyToNvBuffer(rec_buf_fd);
+                NvBufSurfaceSyncForCpu(rec_surface, 0, -1);
+                const auto& p = rec_surface->surfaceList[0];
+
+                size_t total_sz = (size_t)caps.width * caps.height * 3 / 2;
+                if (rec_linear_buf.size() != total_sz) {
+                    rec_linear_buf.resize(total_sz);
+                }
+                const uint8_t* y_src = static_cast<const uint8_t*>(p.mappedAddr.addr[0]);
+                uint32_t y_pitch = p.planeParams.pitch[0];
+                for (uint32_t r = 0; r < caps.height; ++r) {
+                    memcpy(rec_linear_buf.data() + (size_t)r * caps.width, y_src + (size_t)r * y_pitch, caps.width);
+                }
+                const uint8_t* uv_src = static_cast<const uint8_t*>(p.mappedAddr.addr[1]);
+                uint32_t uv_pitch = p.planeParams.pitch[1];
+                size_t uv_off = (size_t)caps.width * caps.height;
+                for (uint32_t r = 0; r < caps.height / 2; ++r) {
+                    memcpy(rec_linear_buf.data() + uv_off + (size_t)r * caps.width, uv_src + (size_t)r * uv_pitch, caps.width);
+                }
+
+                FrameMetadata fmeta;
+                fmeta.sequence = num;
+                fmeta.sensor_timestamp_ns = sensor_ts;
+                fmeta.exposure_us = metrics.actual_exposure_us;
+                fmeta.analog_gain = metrics.actual_analog_gain;
+                fmeta.isp_digital_gain = metrics.actual_isp_gain;
+                fmeta.awb_cct = metrics.actual_cct;
+
+                std::lock_guard<std::mutex> rlock(rec_mu);
+                recorder.push_frame(rec_linear_buf.data(), total_sz, fmeta);
+            }
+        }
+
+        // 2. Display copy handshake
         {
             std::lock_guard<std::mutex> lock(display_mu);
             if (display_wants_frame && !display_has_frame) {
-                auto native = interface_cast<NV::IImageNativeBuffer>(f->getImage());
-                if (native) {
+                if (rec_active && rec_surface) {
                     if (disp_buf_fd < 0) {
+                        auto native = interface_cast<NV::IImageNativeBuffer>(f->getImage());
                         disp_buf_fd = native->createNvBuffer(Size2D<uint32_t>(caps.width, caps.height),
                                                              NVBUF_COLOR_FORMAT_NV12,
                                                              NVBUF_LAYOUT_PITCH);
                         NvBufSurfaceFromFd(disp_buf_fd, (void**)&disp_surface);
                         NvBufSurfaceMap(disp_surface, 0, -1, NVBUF_MAP_READ);
                     }
-                    native->copyToNvBuffer(disp_buf_fd);
+                    NvBufSurfaceCopy(rec_surface, disp_surface);
                     disp_seq = num;
                     disp_sensor_ts = sensor_ts;
                     display_has_frame = true;
                     display_wants_frame = false;
                     display_cv.notify_one();
+                } else {
+                    auto native = interface_cast<NV::IImageNativeBuffer>(f->getImage());
+                    if (native) {
+                        if (disp_buf_fd < 0) {
+                            disp_buf_fd = native->createNvBuffer(Size2D<uint32_t>(caps.width, caps.height),
+                                                                 NVBUF_COLOR_FORMAT_NV12,
+                                                                 NVBUF_LAYOUT_PITCH);
+                            NvBufSurfaceFromFd(disp_buf_fd, (void**)&disp_surface);
+                            NvBufSurfaceMap(disp_surface, 0, -1, NVBUF_MAP_READ);
+                        }
+                        native->copyToNvBuffer(disp_buf_fd);
+                        disp_seq = num;
+                        disp_sensor_ts = sensor_ts;
+                        display_has_frame = true;
+                        display_wants_frame = false;
+                        display_cv.notify_one();
+                    }
                 }
             }
         }
@@ -661,5 +745,43 @@ bool CameraService::acquire_display_frame(NvBufSurface** out_surface, uint64_t* 
 void CameraService::release_display_frame() {
     std::lock_guard<std::mutex> lock(impl_->display_mu);
     if (running_.load()) impl_->display_wants_frame = true;
+}
+bool CameraService::start_recording(const std::string& directory) {
+    if (!running_.load()) return false;
+    std::lock_guard<std::mutex> lock(impl_->rec_mu);
+    if (impl_->recorder.is_recording()) return false;
+    auto caps = get_capabilities();
+    auto t = std::time(nullptr);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    std::ostringstream ss;
+    ss << directory << "/rec_" << std::put_time(&tm, "%Y%m%d_%H%M%S") << ".avi";
+    std::string path = ss.str();
+    return impl_->recorder.start(path, caps.width, caps.height, caps.target_fps);
+}
+
+bool CameraService::stop_recording() {
+    std::lock_guard<std::mutex> lock(impl_->rec_mu);
+    return impl_->recorder.stop();
+}
+
+OriginalRecordingStatus CameraService::get_recording_status() const {
+    std::lock_guard<std::mutex> lock(impl_->rec_mu);
+    return impl_->recorder.get_status();
+}
+
+AiStatus CameraService::get_ai_status() const {
+    AiStatus st;
+    st.enabled = (impl_->ai_consumer.get() != nullptr && impl_->shm_header != nullptr);
+    st.width = impl_->ai_width;
+    st.height = impl_->ai_height;
+    st.shm_name = impl_->shm_name_str;
+    if (st.enabled && impl_->shm_header) {
+        st.last_sequence = impl_->shm_header->latest_seq.load(std::memory_order_relaxed);
+        uint64_t hb = impl_->shm_header->reader_heartbeat_ns.load(std::memory_order_relaxed);
+        uint64_t now = now_ns();
+        st.reader_active = (hb > 0 && now >= hb && (now - hb) <= 2000000000ULL);
+    }
+    return st;
 }
 

@@ -64,6 +64,7 @@ class StudioCamera:
         if output_format not in ("bgr", "nv12"):
             raise ValueError("output_format must be 'bgr' or 'nv12'")
 
+        self._client = None
         self.lib = _find_lib()
         self._setup_lib()
 

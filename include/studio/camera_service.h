@@ -4,7 +4,7 @@
 #define STUDIO_CAMERA_SERVICE_H
 
 #include "studio/shm_protocol.h"
-#include <atomic>
+#include "studio/sensor_recorder.h"
 #include <condition_variable>
 #include <functional>
 #include <memory>
@@ -65,6 +65,15 @@ struct CameraMetrics {
     uint64_t last_sequence = 0;
     uint64_t uptime_ms = 0;
 };
+struct AiStatus {
+    bool enabled{false};
+    bool reader_active{false};
+    uint32_t width{0};
+    uint32_t height{0};
+    uint64_t last_sequence{0};
+    std::string shm_name;
+};
+
 
 class CameraService {
 public:
@@ -81,6 +90,12 @@ public:
     CameraControls get_controls() const;
     CameraMetrics get_metrics() const;
     void update_controls(const CameraControls& c);
+    // Full-rate native sensor recording
+    bool start_recording(const std::string& directory = "recordings");
+    bool stop_recording();
+    OriginalRecordingStatus get_recording_status() const;
+    AiStatus get_ai_status() const;
+
 
     // Acquire a mapped NV12 surface; stable until release_display_frame().
     // Single display consumer. Release after all reads from the surface finish;

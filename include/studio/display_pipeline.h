@@ -58,6 +58,11 @@ struct PitchDetectStatus {
     int current_motion_level = 0;    // 0 - 100%
     uint64_t total_clips = 0;
     std::string last_clip_path;
+    uint32_t width = 960;
+    uint32_t height = 714;
+    double fps = 30.0;
+    double buffered_sec = 0.0;
+    std::string error;
 };
 
 class DisplayPipeline {
@@ -81,13 +86,6 @@ public:
     void increment_viewers();
     void decrement_viewers();
     std::string capture_snapshot(const std::string& directory = "snapshots");
-    // Video Recording
-    bool start_recording(const std::string& directory = "recordings");
-    bool stop_recording();
-    bool is_recording() const;
-    std::string get_recording_path() const;
-    uint64_t get_recorded_frames() const;
-
     // Calibration
     bool capture_calibration_frame();
     nlohmann::json compute_calibration();
@@ -127,14 +125,6 @@ private:
     mutable std::mutex metrics_mu_;
     DisplayMetrics metrics_;
     std::atomic<uint32_t> viewers_count_{0};
-    // Video Recording
-    mutable std::mutex record_mu_;
-    std::atomic<bool> is_recording_{false};
-    cv::VideoWriter record_writer_;
-    std::string record_path_;
-    std::atomic<uint64_t> recorded_frames_{0};
-    uint64_t record_start_time_ns_{0};
-
     // Calibration
     mutable std::mutex calib_mu_;
     std::vector<std::vector<cv::Point2f>> calib_corners_all_;

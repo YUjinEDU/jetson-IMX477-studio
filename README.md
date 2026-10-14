@@ -24,9 +24,12 @@ Provides an intuitive browser-based control dashboard, zero-drop frame acquisiti
   - **Luma Histogram**: 64-bin distribution bar graph updated at 4Hz.
   - **Motion Blur Calculator**: Enter object speed (e.g., 140 km/h baseball) to calculate theoretical motion streak in centimeters and sensor pixels.
   - **Pan & Zoom**: Fit, 1:1 Native pixel crop, and 2&times; digital crop with click-to-center navigation.
+- **Native Full-Rate Sensor Recording (`센서 원본 REC`)**: Records directly from the hardware ingestion loop at the full sensor framerate (**120fps** in mode 2, **60fps** in mode 1, **30fps** in mode 0) saving compliant Motion-JPEG AVI files alongside `.csv` metadata sidecars (`sequence`, `sensor_timestamp_ns`, `exposure_us`, `analog_gain`, `isp_digital_gain`, `awb_cct`) for frame-accurate pitch velocity and trajectory analysis.
+- **One-Click Purpose Presets**: Dedicated header buttons for instant mode and exposure configuration:
+  - **실내 확인** (Indoor Preview): 1080p 60fps, 8ms AE exposure ceiling, 16× AE gain ceiling, Auto AWB, 60Hz antibanding, 30fps preview.
+  - **투구 · AI 120fps** (Pitch & AI Tracking): 1332×990 120fps, 1ms fast shutter, 22.25× gain ceiling, Auto AWB, 60Hz antibanding, precision crosshair, and AI stream ready.
 - **Full-Resolution Snapshots**: Saves sensor-resolution JPEG images with timestamped JSON metadata sidecars, including 3840&times;2160 in 4K mode.
 - **Multi-Process AI Fanout (`StudioCamera`)**: High-speed POSIX shared-memory ring buffer (64 slots) with seqlock synchronization and futex wakeups. Allows Python AI pipelines (YOLO) to consume raw BGR frames concurrently at a sustained **120+ fps with 0 drops**.
-
 ---
 
 ## Architecture
@@ -137,10 +140,9 @@ http://<jetson-ip>:8477
   avoiding the browser's lack of native MJPEG-in-AVI playback. Replay prefetches
   a bounded set of decoded frames, supports 0.1×/0.25×/0.5×/1× playback and exact
   one-frame stepping, and ignores cancelled scrub/close/clip-switch responses.
-- Recordings and pitch clips contain **preview frames**, not the full-rate
-  120fps sensor stream. Replay timing uses the clip's actual container FPS.
-  Network/decode delays can reduce playback speed; frames are not advanced
-  before they have decoded. Motion detection uses clean pre-overlay grayscale.
+- Manual video recordings (`센서 원본 REC`) save **full sensor-resolution, full sensor-rate frames** (e.g. 1332×990 @ 120fps) directly from the hardware ingestion loop into compliant MJPEG AVI containers alongside `.csv` metadata sidecars, independent of the 30fps display pipeline.
+- Pitch auto-clips capture preview frames into indexed AVI files. Replay timing uses each clip's actual container FPS.
+  Network/decode delays can reduce playback speed; frames are not advanced before they have decoded. Motion detection uses clean pre-overlay grayscale.
   Stopping the display during a clip drains pending frames and closes its writer
   before restarting. Old-resolution pre-roll/motion buffers and queued job
   metadata are cleared; clip names include a monotonic timestamp suffix.

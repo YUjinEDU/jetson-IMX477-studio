@@ -401,14 +401,6 @@ void DisplayPipeline::run() {
                 cv::line(bgr, cv::Point(bgr.cols - pad, 0), cv::Point(bgr.cols - pad, bgr.rows), cv::Scalar(200, 200, 200), 1);
             }
         }
-        // Video recording frame write
-        if (is_recording_.load()) {
-            std::lock_guard<std::mutex> rlock(record_mu_);
-            if (record_writer_.isOpened()) {
-                record_writer_.write(bgr);
-                recorded_frames_.fetch_add(1);
-            }
-        }
 
         // Calibration capture check
         {
@@ -567,59 +559,6 @@ std::string DisplayPipeline::capture_snapshot(const std::string& directory) {
     return snapshot_result_path_;
 }
 
-bool DisplayPipeline::start_recording(const std::string& directory) {
-    if (!running_.load()) return false;
-    std::lock_guard<std::mutex> lock(record_mu_);
-    if (is_recording_.load()) return false;
-
-    std::error_code ec;
-    std::filesystem::create_directories(directory, ec);
-
-    auto t = std::time(nullptr);
-    struct tm tm;
-    localtime_r(&t, &tm);
-    std::ostringstream ss;
-    ss << directory << "/rec_" << std::put_time(&tm, "%Y%m%d_%H%M%S") << ".avi";
-    record_path_ = ss.str();
-
-    auto caps = camera_.get_capabilities();
-    int target_w = 960;
-    int target_h = (int)std::lround(960.0 * caps.height / caps.width) & ~1;
-
-    bool ok = record_writer_.open(record_path_, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'),
-                                  30.0, cv::Size(target_w, target_h));
-    if (!ok) {
-        record_path_.clear();
-        return false;
-    }
-    recorded_frames_.store(0);
-    record_start_time_ns_ = now_ns();
-    is_recording_.store(true);
-    return true;
-}
-
-bool DisplayPipeline::stop_recording() {
-    std::lock_guard<std::mutex> lock(record_mu_);
-    if (!is_recording_.load()) return false;
-    is_recording_.store(false);
-    if (record_writer_.isOpened()) {
-        record_writer_.release();
-    }
-    return true;
-}
-
-bool DisplayPipeline::is_recording() const {
-    return is_recording_.load();
-}
-
-std::string DisplayPipeline::get_recording_path() const {
-    std::lock_guard<std::mutex> lock(record_mu_);
-    return record_path_;
-}
-
-uint64_t DisplayPipeline::get_recorded_frames() const {
-    return recorded_frames_.load();
-}
 
 bool DisplayPipeline::capture_calibration_frame() {
     if (!running_.load()) return false;
@@ -642,7 +581,6 @@ int DisplayPipeline::get_calibration_frame_count() const {
     std::lock_guard<std::mutex> lock(calib_mu_);
     return (int)calib_corners_all_.size();
 }
-
 nlohmann::json DisplayPipeline::compute_calibration() {
     std::lock_guard<std::mutex> lock(calib_mu_);
     if (calib_corners_all_.size() < 3) {
@@ -717,7 +655,13 @@ PitchDetectConfig DisplayPipeline::get_pitch_config() const {
 
 PitchDetectStatus DisplayPipeline::get_pitch_status() const {
     std::lock_guard<std::mutex> lock(pitch_mu_);
-    return pitch_status_;
+    auto st = pitch_status_;
+    auto caps = camera_.get_capabilities();
+    st.width = 960;
+    st.height = (uint32_t)std::lround(960.0 * caps.height / caps.width) & ~1;
+    st.fps = current_fps_target_ > 0 ? (double)current_fps_target_ : 30.0;
+    st.buffered_sec = (double)pre_roll_buffer_.size() / std::max(1.0, st.fps);
+    return st;
 }
 
 nlohmann::json DisplayPipeline::get_calibration() const {

@@ -253,6 +253,91 @@ static uint64_t get_ram_used_mb() {
 
 using json = nlohmann::json;
 
+static json controls_to_json(const CameraControls& ctrl) {
+    return {
+        {"auto_exposure", ctrl.auto_exposure},
+        {"exposure_us", ctrl.exposure_us},
+        {"gain", ctrl.gain},
+        {"ae_max_exposure_us", ctrl.ae_max_exposure_us},
+        {"ae_max_gain", ctrl.ae_max_gain},
+        {"ae_lock", ctrl.ae_lock},
+        {"ev_compensation", ctrl.ev_compensation},
+        {"antibanding", ctrl.antibanding},
+        {"awb_mode", ctrl.awb_mode},
+        {"awb_lock", ctrl.awb_lock},
+        {"isp_digital_gain", ctrl.isp_digital_gain},
+        {"denoise_mode", ctrl.denoise_mode},
+        {"edge_mode", ctrl.edge_mode}
+    };
+}
+
+static json display_settings_to_json(const DisplaySettings& ds) {
+    return {
+        {"zoom_mode", ds.zoom_mode},
+        {"center_x", ds.center_x},
+        {"center_y", ds.center_y},
+        {"focus_peaking", ds.focus_peaking},
+        {"peaking_color", ds.peaking_color},
+        {"peaking_threshold", ds.peaking_threshold},
+        {"zebra_stripes", ds.zebra_stripes},
+        {"zebra_threshold", ds.zebra_threshold},
+        {"grid_mode", ds.grid_mode},
+        {"jpeg_quality", ds.jpeg_quality},
+        {"fps_limit", ds.fps_limit},
+        {"false_color", ds.false_color}
+    };
+}
+
+static json capabilities_to_json(const CameraCapabilities& caps) {
+    return {
+        {"width", caps.width},
+        {"height", caps.height},
+        {"target_fps", caps.target_fps},
+        {"min_exposure_us", caps.min_exposure_us},
+        {"max_exposure_us", caps.max_exposure_us},
+        {"min_gain", caps.min_gain},
+        {"max_gain", caps.max_gain},
+        {"active_sensor_mode", caps.active_sensor_mode}
+    };
+}
+
+static json recording_status_to_json(const OriginalRecordingStatus& st) {
+    json j = {
+        {"recording", st.recording},
+        {"ready", st.ready},
+        {"path", st.path},
+        {"error", st.error},
+        {"frames", st.frames},
+        {"dropped_frames", st.dropped_frames},
+        {"width", st.width},
+        {"height", st.height},
+        {"fps", st.fps},
+        {"actual_fps", st.actual_fps},
+        {"buffered_sec", st.buffered_sec}
+    };
+    if (!st.path.empty()) {
+        std::string meta = st.metadata_url;
+        if (meta.empty()) {
+            std::filesystem::path p(st.path);
+            std::string stem = p.stem().string();
+            meta = "/recordings/" + stem + ".csv";
+        }
+        j["metadata_url"] = meta;
+    }
+    return j;
+}
+
+static json ai_status_to_json(const AiStatus& st) {
+    return {
+        {"enabled", st.enabled},
+        {"reader_active", st.reader_active},
+        {"width", st.width},
+        {"height", st.height},
+        {"last_sequence", st.last_sequence},
+        {"shm_name", st.shm_name}
+    };
+}
+
 struct HttpServer::Impl {
     CameraService& camera;
     DisplayPipeline& display;
@@ -386,49 +471,15 @@ bool HttpServer::start() {
                         {"active_viewers", dm.active_viewers},
                         {"histogram_64", dm.histogram_64}
                     }},
-                    {"controls", {
-                        {"auto_exposure", ctrl.auto_exposure},
-                        {"exposure_us", ctrl.exposure_us},
-                        {"gain", ctrl.gain},
-                        {"ae_max_exposure_us", ctrl.ae_max_exposure_us},
-                        {"ae_max_gain", ctrl.ae_max_gain},
-                        {"ae_lock", ctrl.ae_lock},
-                        {"ev_compensation", ctrl.ev_compensation},
-                        {"antibanding", ctrl.antibanding},
-                        {"awb_mode", ctrl.awb_mode},
-                        {"awb_lock", ctrl.awb_lock},
-                        {"isp_digital_gain", ctrl.isp_digital_gain},
-                        {"denoise_mode", ctrl.denoise_mode},
-                        {"edge_mode", ctrl.edge_mode}
-                    }},
-                    {"display_settings", {
-                        {"zoom_mode", ds.zoom_mode},
-                        {"center_x", ds.center_x},
-                        {"center_y", ds.center_y},
-                        {"focus_peaking", ds.focus_peaking},
-                        {"peaking_color", ds.peaking_color},
-                        {"peaking_threshold", ds.peaking_threshold},
-                        {"zebra_stripes", ds.zebra_stripes},
-                        {"zebra_threshold", ds.zebra_threshold},
-                        {"grid_mode", ds.grid_mode},
-                        {"jpeg_quality", ds.jpeg_quality},
-                        {"fps_limit", ds.fps_limit},
-                        {"false_color", ds.false_color},
-                    }},
-                    {"capabilities", {
-                        {"width", caps.width},
-                        {"height", caps.height},
-                        {"target_fps", caps.target_fps},
-                        {"min_exposure_us", caps.min_exposure_us},
-                        {"max_exposure_us", caps.max_exposure_us},
-                        {"min_gain", caps.min_gain},
-                        {"max_gain", caps.max_gain},
-                        {"active_sensor_mode", caps.active_sensor_mode}
-                    }},
+                    {"controls", controls_to_json(ctrl)},
+                    {"display_settings", display_settings_to_json(ds)},
+                    {"capabilities", capabilities_to_json(caps)},
                     {"system_metrics", {
                         {"cpu_temp_c", get_cpu_temp_c()},
                         {"ram_used_mb", get_ram_used_mb()}
-                    }}
+                    }},
+                    {"recording_status", recording_status_to_json(impl_->camera.get_recording_status())},
+                    {"ai_status", ai_status_to_json(impl_->camera.get_ai_status())}
                 };
 
                 std::string sse_msg = "data: " + payload.dump() + "\n\n";
@@ -449,45 +500,9 @@ bool HttpServer::start() {
         auto caps = impl_->camera.get_capabilities();
 
         json state = {
-            {"controls", {
-                {"auto_exposure", ctrl.auto_exposure},
-                {"exposure_us", ctrl.exposure_us},
-                {"gain", ctrl.gain},
-                {"ae_max_exposure_us", ctrl.ae_max_exposure_us},
-                {"ae_max_gain", ctrl.ae_max_gain},
-                {"ae_lock", ctrl.ae_lock},
-                {"ev_compensation", ctrl.ev_compensation},
-                {"antibanding", ctrl.antibanding},
-                {"awb_mode", ctrl.awb_mode},
-                {"awb_lock", ctrl.awb_lock},
-                {"isp_digital_gain", ctrl.isp_digital_gain},
-                {"denoise_mode", ctrl.denoise_mode},
-                {"edge_mode", ctrl.edge_mode}
-            }},
-            {"display_settings", {
-                {"zoom_mode", ds.zoom_mode},
-                {"center_x", ds.center_x},
-                {"center_y", ds.center_y},
-                {"focus_peaking", ds.focus_peaking},
-                {"peaking_color", ds.peaking_color},
-                {"peaking_threshold", ds.peaking_threshold},
-                {"zebra_stripes", ds.zebra_stripes},
-                {"zebra_threshold", ds.zebra_threshold},
-                {"grid_mode", ds.grid_mode},
-                {"jpeg_quality", ds.jpeg_quality},
-                {"fps_limit", ds.fps_limit},
-                {"false_color", ds.false_color},
-            }},
-            {"capabilities", {
-                {"width", caps.width},
-                {"height", caps.height},
-                {"target_fps", caps.target_fps},
-                {"min_exposure_us", caps.min_exposure_us},
-                {"max_exposure_us", caps.max_exposure_us},
-                {"min_gain", caps.min_gain},
-                {"max_gain", caps.max_gain},
-                {"active_sensor_mode", caps.active_sensor_mode}
-            }},
+            {"controls", controls_to_json(ctrl)},
+            {"display_settings", display_settings_to_json(ds)},
+            {"capabilities", capabilities_to_json(caps)},
             {"camera_metrics", {
                 {"sensor_fps", cm.sensor_fps},
                 {"host_fps", cm.host_fps},
@@ -508,6 +523,8 @@ bool HttpServer::start() {
                 {{"mode", 1}, {"label", "Full HD (1920×1080 @ 60 FPS)"}, {"width", 1920}, {"height", 1080}, {"fps", 60.0}},
                 {{"mode", 2}, {"label", "120 FPS 초고속 (1332×990 @ 120 FPS)"}, {"width", 1332}, {"height", 990}, {"fps", 120.0}}
             }},
+            {"recording_status", recording_status_to_json(impl_->camera.get_recording_status())},
+            {"ai_status", ai_status_to_json(impl_->camera.get_ai_status())}
         };
         res.set_content(state.dump(2), "application/json");
     });
@@ -550,9 +567,23 @@ bool HttpServer::start() {
                 res.set_content("{\"status\":\"error\",\"error\":\"mode must be 0, 1, or 2\"}", "application/json");
                 return;
             }
-            bool was_recording = impl_->display.is_recording();
+            int current_mode = impl_->camera.get_sensor_mode();
+            if (current_mode == mode) {
+                auto caps = impl_->camera.get_capabilities();
+                json out = {
+                    {"status", "ok"},
+                    {"mode", mode},
+                    {"width", caps.width},
+                    {"height", caps.height},
+                    {"target_fps", caps.target_fps}
+                };
+                res.set_content(out.dump(), "application/json");
+                return;
+            }
+
+            bool was_recording = impl_->camera.get_recording_status().recording;
             if (was_recording) {
-                impl_->display.stop_recording();
+                impl_->camera.stop_recording();
             }
             impl_->display.stop(); // Quiesce display worker: joined before camera teardown
 
@@ -560,9 +591,8 @@ bool HttpServer::start() {
 
             impl_->display.start(); // Restart display pipeline with new resolution
             if (was_recording && ok) {
-                impl_->display.start_recording("recordings");
+                impl_->camera.start_recording("recordings");
             }
-
             if (ok) {
                 auto caps = impl_->camera.get_capabilities();
                 json out = {
@@ -649,38 +679,36 @@ bool HttpServer::start() {
 
     // 7c. API: Video Recording
     impl_->svr.Post("/api/record/start", [this](const httplib::Request&, httplib::Response& res) {
-        if (impl_->display.start_recording("recordings")) {
-            json resp = {
-                {"status", "ok"},
-                {"recording", true},
-                {"path", impl_->display.get_recording_path()}
-            };
+        std::unique_lock<std::mutex> tx_lock(impl_->sensor_mode_tx_mu);
+        bool ok = impl_->camera.start_recording("recordings");
+        auto st = impl_->camera.get_recording_status();
+        json resp = recording_status_to_json(st);
+        if (ok) {
+            resp["status"] = "ok";
             res.set_content(resp.dump(), "application/json");
         } else {
+            resp["status"] = "error";
+            if (resp["error"].get<std::string>().empty()) {
+                resp["error"] = "Failed to start recording";
+            }
             res.status = 500;
-            res.set_content("{\"status\":\"error\",\"error\":\"Failed to start recording\"}", "application/json");
+            res.set_content(resp.dump(), "application/json");
         }
     });
 
     impl_->svr.Post("/api/record/stop", [this](const httplib::Request&, httplib::Response& res) {
-        std::string path = impl_->display.get_recording_path();
-        uint64_t frames = impl_->display.get_recorded_frames();
-        bool ok = impl_->display.stop_recording();
-        json resp = {
-            {"status", ok ? "ok" : "error"},
-            {"recording", false},
-            {"path", path},
-            {"frames", frames}
-        };
+        std::unique_lock<std::mutex> tx_lock(impl_->sensor_mode_tx_mu);
+        bool ok = impl_->camera.stop_recording();
+        auto st = impl_->camera.get_recording_status();
+        json resp = recording_status_to_json(st);
+        resp["status"] = ok ? "ok" : "error";
         res.set_content(resp.dump(), "application/json");
     });
 
     impl_->svr.Get("/api/record/status", [this](const httplib::Request&, httplib::Response& res) {
-        json resp = {
-            {"recording", impl_->display.is_recording()},
-            {"path", impl_->display.get_recording_path()},
-            {"frames", impl_->display.get_recorded_frames()}
-        };
+        auto st = impl_->camera.get_recording_status();
+        json resp = recording_status_to_json(st);
+        resp["status"] = st.error.empty() ? "ok" : "error";
         res.set_content(resp.dump(), "application/json");
     });
 
@@ -693,15 +721,24 @@ bool HttpServer::start() {
                 if (entry.is_regular_file()) {
                     std::string ext = entry.path().extension().string();
                     if (ext == ".avi" || ext == ".mp4") {
-                        list.push_back({
+                        json item = {
                             {"filename", entry.path().filename().string()},
                             {"url", "/recordings/" + entry.path().filename().string()},
                             {"size", (uint64_t)entry.file_size(ec)}
-                        });
+                        };
+                        fs::path csv_candidate = entry.path().parent_path() / (entry.path().stem().string() + ".csv");
+                        std::error_code ec_csv;
+                        if (fs::exists(csv_candidate, ec_csv) && fs::is_regular_file(csv_candidate, ec_csv)) {
+                            item["metadata_url"] = "/recordings/" + entry.path().stem().string() + ".csv";
+                        }
+                        list.push_back(item);
                     }
                 }
             }
         }
+        std::sort(list.begin(), list.end(), [](const json& a, const json& b) {
+            return a.value("filename", "") > b.value("filename", "");
+        });
         res.set_content(list.dump(), "application/json");
     });
 
@@ -741,6 +778,11 @@ bool HttpServer::start() {
             {"motion_level", ps.current_motion_level},
             {"total_clips", ps.total_clips},
             {"last_clip_path", ps.last_clip_path},
+            {"fps", ps.fps},
+            {"width", ps.width},
+            {"height", ps.height},
+            {"buffered_sec", ps.buffered_sec},
+            {"error", ps.error},
             {"config", {
                 {"threshold", cfg.motion_threshold},
                 {"min_motion_pixels", cfg.min_motion_pixels},
@@ -788,6 +830,9 @@ bool HttpServer::start() {
                 }
             }
         }
+        std::sort(list.begin(), list.end(), [](const json& a, const json& b) {
+            return a.value("filename", "") > b.value("filename", "");
+        });
         res.set_content(list.dump(), "application/json");
     });
 
@@ -920,6 +965,129 @@ bool HttpServer::start() {
         } else {
             res.status = 404;
             res.set_content("{\"error\":\"Preset not found\"}", "application/json");
+        }
+    });
+
+    impl_->svr.Post(R"(/api/presets/([^/]+)/apply)", [this](const httplib::Request& req, httplib::Response& res) {
+        try {
+            std::unique_lock<std::mutex> tx_lock(impl_->sensor_mode_tx_mu);
+            std::string name = req.matches[1];
+            json preset_data;
+            if (!impl_->presets.load_preset(name, preset_data)) {
+                res.status = 404;
+                res.set_content("{\"status\":\"error\",\"error\":\"Preset not found\"}", "application/json");
+                return;
+            }
+
+            int target_mode = -1;
+            if (preset_data.contains("sensor_mode")) {
+                if (!preset_data["sensor_mode"].is_number_integer()) {
+                    res.status = 400;
+                    res.set_content("{\"status\":\"error\",\"error\":\"sensor_mode must be an integer\"}", "application/json");
+                    return;
+                }
+                target_mode = preset_data["sensor_mode"].get<int>();
+                if (target_mode < 0 || target_mode > 2) {
+                    res.status = 400;
+                    res.set_content("{\"status\":\"error\",\"error\":\"sensor_mode must be 0, 1, or 2\"}", "application/json");
+                    return;
+                }
+            }
+
+            CameraControls ctrl = impl_->camera.get_controls();
+            if (preset_data.contains("controls") && preset_data["controls"].is_object()) {
+                const auto& c = preset_data["controls"];
+                if (c.contains("auto_exposure")) ctrl.auto_exposure = c["auto_exposure"].get<bool>();
+                if (c.contains("exposure_us")) ctrl.exposure_us = c["exposure_us"].get<uint64_t>();
+                if (c.contains("gain")) ctrl.gain = c["gain"].get<float>();
+                if (c.contains("ae_max_exposure_us")) ctrl.ae_max_exposure_us = c["ae_max_exposure_us"].get<uint64_t>();
+                if (c.contains("ae_max_gain")) ctrl.ae_max_gain = c["ae_max_gain"].get<float>();
+                if (c.contains("ae_lock")) ctrl.ae_lock = c["ae_lock"].get<bool>();
+                if (c.contains("ev_compensation")) ctrl.ev_compensation = c["ev_compensation"].get<float>();
+                if (c.contains("antibanding")) ctrl.antibanding = c["antibanding"].get<std::string>();
+                if (c.contains("awb_mode")) ctrl.awb_mode = c["awb_mode"].get<std::string>();
+                if (c.contains("awb_lock")) ctrl.awb_lock = c["awb_lock"].get<bool>();
+                if (c.contains("isp_digital_gain")) ctrl.isp_digital_gain = c["isp_digital_gain"].get<float>();
+                if (c.contains("denoise_mode")) ctrl.denoise_mode = c["denoise_mode"].get<std::string>();
+                if (c.contains("edge_mode")) ctrl.edge_mode = c["edge_mode"].get<std::string>();
+            }
+
+            DisplaySettings ds = impl_->display.get_settings();
+            const json* disp_ptr = nullptr;
+            if (preset_data.contains("display") && preset_data["display"].is_object()) {
+                disp_ptr = &preset_data["display"];
+            } else if (preset_data.contains("display_settings") && preset_data["display_settings"].is_object()) {
+                disp_ptr = &preset_data["display_settings"];
+            }
+            if (disp_ptr) {
+                const auto& d = *disp_ptr;
+                if (d.contains("zoom_mode")) ds.zoom_mode = d["zoom_mode"].get<std::string>();
+                if (d.contains("center_x")) ds.center_x = d["center_x"].get<float>();
+                if (d.contains("center_y")) ds.center_y = d["center_y"].get<float>();
+                if (d.contains("focus_peaking")) ds.focus_peaking = d["focus_peaking"].get<bool>();
+                if (d.contains("peaking_color")) ds.peaking_color = d["peaking_color"].get<std::string>();
+                if (d.contains("peaking_threshold")) ds.peaking_threshold = d["peaking_threshold"].get<int>();
+                if (d.contains("zebra_stripes")) ds.zebra_stripes = d["zebra_stripes"].get<bool>();
+                if (d.contains("zebra_threshold")) ds.zebra_threshold = d["zebra_threshold"].get<int>();
+                if (d.contains("grid_mode")) ds.grid_mode = d["grid_mode"].get<std::string>();
+                if (d.contains("jpeg_quality")) ds.jpeg_quality = d["jpeg_quality"].get<int>();
+                if (d.contains("fps_limit")) ds.fps_limit = d["fps_limit"].get<int>();
+                if (d.contains("false_color")) ds.false_color = d["false_color"].get<bool>();
+            }
+
+            // Apply sensor_mode if present and different from active mode
+            if (target_mode >= 0 && target_mode != impl_->camera.get_sensor_mode()) {
+                bool was_recording = impl_->camera.get_recording_status().recording;
+                if (was_recording) {
+                    impl_->camera.stop_recording();
+                }
+                impl_->display.stop();
+
+                bool ok = impl_->camera.set_sensor_mode(target_mode);
+
+                impl_->display.start();
+                if (was_recording && ok) {
+                    impl_->camera.start_recording("recordings");
+                }
+                if (!ok) {
+                    res.status = 500;
+                    res.set_content("{\"status\":\"error\",\"error\":\"Failed to switch sensor mode during preset apply\"}", "application/json");
+                    return;
+                }
+            }
+
+            // Apply camera controls
+            if (preset_data.contains("controls")) {
+                impl_->camera.update_controls(ctrl);
+            }
+
+            // Apply display settings
+            if (disp_ptr != nullptr) {
+                impl_->display.update_settings(ds);
+            }
+
+            auto caps = impl_->camera.get_capabilities();
+            auto rec_st = impl_->camera.get_recording_status();
+            auto ai_st = impl_->camera.get_ai_status();
+
+            json resp = {
+                {"status", "ok"},
+                {"preset", name},
+                {"name", name},
+                {"mode", caps.active_sensor_mode},
+                {"width", caps.width},
+                {"height", caps.height},
+                {"target_fps", caps.target_fps},
+                {"controls", controls_to_json(ctrl)},
+                {"display_settings", display_settings_to_json(ds)},
+                {"capabilities", capabilities_to_json(caps)},
+                {"recording_status", recording_status_to_json(rec_st)},
+                {"ai_status", ai_status_to_json(ai_st)}
+            };
+            res.set_content(resp.dump(2), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            res.set_content(std::string("{\"status\":\"error\",\"error\":\"") + e.what() + "\"}", "application/json");
         }
     });
 

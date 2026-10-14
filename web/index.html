@@ -15,6 +15,16 @@
       <span class="status-dot connected" id="conn-pill" title="Hardware ISP Connected"></span>
       <span class="studio-logo">IMX477 STUDIO</span>
 
+      <!-- One-Click Purpose Presets -->
+      <div class="purpose-group" id="purpose-group">
+        <button type="button" class="btn-purpose" id="btn-preset-indoor" title="실내 조명 환경 표준 모니터링 (1080p 60fps / 8ms 노출 / 자동WB / 60Hz)">
+          <span class="purpose-dot"></span>실내 확인
+        </button>
+        <button type="button" class="btn-purpose btn-purpose-pitch" id="btn-preset-pitch" title="초고속 투구 추적 & AI 120fps 분석 (990p 120fps / 1ms 노출 / 크로스헤어)">
+          <span class="purpose-dot"></span>투구 · AI 120fps
+        </button>
+      </div>
+
       <!-- Sensor Mode Selector (30p 4K / 60p FHD / 120p High-Speed) -->
       <div class="seg-group" id="sensor-mode-group">
         <button class="seg-btn" data-sensor-mode="0" title="4K UHD: 3840×2160 @ 30 FPS (초고해상도 디테일 분석)">4K 30P</button>
@@ -22,12 +32,14 @@
         <button class="seg-btn active" data-sensor-mode="2" title="High-Speed: 1332×990 @ 120 FPS (초고속 동체 추적 & 야구 분석)">990 120P</button>
       </div>
 
-      <span class="pill pill-muted" id="badge-shm" title="AI Shared Memory Ring Buffer">SHM /dev/shm</span>
+      <span class="pill pill-muted" id="badge-ai" title="AI 스트림 및 SHM 판독기 상태 (ACTIVE는 판독기 프로세스 하트비트이며 모델 추론 검증이 아닙니다)">AI: OFF</span>
+      <span class="pill pill-muted" id="badge-rec" title="센서 원본 고속 레코더 상태">센서 원본 REC 대기</span>
     </div>
 
     <!-- Quick Telemetry Ticker -->
     <div class="header-ticker">
-      <div class="ticker-item"><span class="ticker-k">FPS</span> <span class="ticker-v" id="metric-sensor-fps">120.0</span></div>
+      <div class="ticker-item"><span class="ticker-k">SENSOR</span> <span class="ticker-v" id="metric-sensor-fps">120.0</span></div>
+      <div class="ticker-item"><span class="ticker-k">VIEW</span> <span class="ticker-v" id="metric-view-fps">30</span></div>
       <div class="ticker-item"><span class="ticker-k">DROP</span> <span class="ticker-v success" id="metric-gaps">0</span></div>
       <div class="ticker-item"><span class="ticker-k">TOTAL</span> <span class="ticker-v" id="metric-total-frames">0</span></div>
       <div class="ticker-item"><span class="ticker-k">UPTIME</span> <span class="ticker-v" id="metric-uptime">00:00</span></div>
@@ -37,8 +49,8 @@
 
     <!-- Right Global Actions -->
     <div class="header-right">
-      <button id="btn-record" class="btn btn-rec" title="영상 녹화 시작/정지 (단축키 R)">
-        <span class="rec-dot"></span> <span id="rec-label">REC</span> <span id="rec-timer" style="display: none;">00:00</span>
+      <button id="btn-record" class="btn btn-rec" title="센서 원본 영상 녹화 시작/정지 (단축키 R)">
+        <span class="rec-dot"></span> <span id="rec-label">센서 원본 REC</span> <span id="rec-timer" style="display: none;">00:00</span>
       </button>
       <button id="btn-snapshot" class="btn btn-snap" title="스냅샷 캡처 (스페이스바)">SNAP (Space)</button>
       <div class="header-divider"></div>
@@ -327,6 +339,23 @@
                 </div>
               </div>
 
+              <!-- Native Pre-roll Buffer Readiness -->
+              <div class="pitch-buffer-box" style="margin-top: 10px; background: var(--bg-subtle); padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border);">
+                <div class="row-between">
+                  <span class="ctrl-name" style="font-size: 11px;">센서 원본 사전 버퍼 상태:</span>
+                  <span id="pitch-buffer-readiness" class="pill pill-muted">버퍼 대기 중</span>
+                </div>
+                <div class="row-between" style="margin-top: 4px; font-size: 11px; color: var(--text-muted);">
+                  <span>버퍼 충전: <strong id="val-pitch-buffered" style="color: var(--text-main);">0.0s / 1.5s</strong></span>
+                  <span id="pitch-native-spec" style="font-family: var(--font-mono);">1332×990 @ 120 FPS</span>
+                </div>
+                <div class="meter-track" style="margin-top: 4px; height: 6px;">
+                  <div id="pitch-buffer-fill" class="meter-fill" style="width: 0%; background: var(--success);"></div>
+                </div>
+                <p class="ctrl-desc" style="margin-top: 4px; font-size: 10.5px;">* 투구 클립은 프리뷰 확대/가이드와 무관하게 120FPS 센서 원본 무손실 프레임으로 버퍼링 및 저장됩니다.</p>
+                <div id="pitch-error-alert" class="pill pill-danger" style="display: none; margin-top: 6px; width: 100%; text-align: center;"></div>
+              </div>
+
               <div class="row-between" style="margin-top: 8px;">
                 <span class="ctrl-desc">추출된 투구 클립: <strong id="val-pitch-clips-count">0</strong> 개</span>
                 <span id="pitch-clip-status-badge" class="pill pill-muted">대기 중 (IDLE)</span>
@@ -401,11 +430,11 @@
 
           <!-- OSD Live HUD -->
           <div class="viewport-osd">
-            <span class="osd-pill" id="hud-res">1332&times;990</span>
-            <span class="osd-pill" id="hud-sensor">120.0 FPS</span>
+            <span class="osd-pill" id="hud-sensor-tag">센서 <span id="hud-sensor">120.0 FPS</span> | <span id="hud-res">1332×990</span></span>
             <span class="osd-pill" id="hud-fps">30 FPS VIEW</span>
+            <span class="osd-pill" id="hud-ai">AI: OFF</span>
             <span class="osd-pill" id="hud-zoom">FIT</span>
-            <span class="osd-pill rec-pill" id="osd-rec-badge" style="display: none;">● REC</span>
+            <span class="osd-pill rec-pill" id="osd-rec-badge" style="display: none;">● 센서 원본 REC</span>
           </div>
         </div>
 
@@ -474,7 +503,7 @@
         <div class="telem-item">
           <div class="telem-header">
             <div>
-              <span class="telem-title">⚡ 120 FPS 성능 안정성 (60초 히스토리)</span>
+              <span class="telem-title" id="fps-graph-title">⚡ 120 FPS 성능 안정성 (60초 히스토리)</span>
               <p class="ctrl-desc" style="margin-top:1px;">프레임 드롭(누락) 없는지 실시간 감시</p>
             </div>
             <span class="telem-v" id="sparkline-val">120.0 fps</span>
@@ -544,9 +573,10 @@
           <img id="replay-frame" style="max-width: 100%; max-height: 60vh; object-fit: contain; display: block;" alt="Replay Frame">
         </div>
         <input type="range" id="replay-scrubber" min="0" max="100" value="0" class="studio-slider" style="margin-top: 8px;">
-        <div class="row-between" style="font-size: 11px; color: #94a3b8; font-family: var(--font-mono); margin-top: 2px;">
+        <div class="row-between" style="font-size: 11px; color: #94a3b8; font-family: var(--font-mono); margin-top: 4px; align-items: center;">
           <span id="replay-frame-text">Frame 0 / 0</span>
-          <span id="replay-time-text">0.00s / 0.00s</span>
+          <span id="replay-time-text">0.000s / 0.000s</span>
+          <a id="replay-csv-btn" href="#" download class="replay-csv-btn" style="display: none;">📊 CSV 메타데이터</a>
         </div>
         <div class="row-between" style="margin-top: 8px; padding: 0 4px;">
           <div class="seg-group seg-xs">

@@ -12,6 +12,9 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <execinfo.h>
+#include <unistd.h>
+#include <cstring>
 
 namespace fs = std::filesystem;
 
@@ -19,6 +22,13 @@ static std::atomic<bool> g_shutdown{false};
 static void on_signal(int sig) {
     (void)sig;
     g_shutdown.store(true);
+}
+static void on_crash(int sig) {
+    void* array[32];
+    size_t size = backtrace(array, 32);
+    fprintf(stderr, "\n[FATAL] Caught signal %d (%s):\n", sig, strsignal(sig));
+    backtrace_symbols_fd(array, size, STDERR_FILENO);
+    _exit(128 + sig);
 }
 
 static void print_usage(const char* prog) {
@@ -100,6 +110,10 @@ int main(int argc, char** argv) {
     CameraControls ctrl = camera.get_controls();
     ctrl.exposure_us = init_exp_us;
     ctrl.gain = init_gain;
+    std::signal(SIGSEGV, on_crash);
+    std::signal(SIGBUS, on_crash);
+    std::signal(SIGILL, on_crash);
+    std::signal(SIGFPE, on_crash);
     ctrl.auto_exposure = false;
     ctrl.awb_mode = "auto";
     camera.update_controls(ctrl);

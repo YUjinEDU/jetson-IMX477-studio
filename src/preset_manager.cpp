@@ -37,10 +37,74 @@ PresetManager::PresetManager(const std::string& custom_dir) {
 }
 
 void PresetManager::ensure_defaults() {
+    // 1. indoor-preview (1080p 60fps sensor mode 1)
+    auto indoor_prev_path = storage_dir_ + "/indoor-preview.json";
+    if (!fs::exists(indoor_prev_path)) {
+        nlohmann::json j = {
+            {"description", "Indoor preview: 1080p 60fps sensor mode, auto exposure (max 8ms, max gain 16x)"},
+            {"sensor_mode", 1},
+            {"controls", {
+                {"auto_exposure", true},
+                {"ae_max_exposure_us", 8000},
+                {"ae_max_gain", 16.0},
+                {"awb_mode", "auto"},
+                {"antibanding", "60hz"}
+            }},
+            {"display", {
+                {"zoom_mode", "fit"},
+                {"fps_limit", 30},
+                {"grid_mode", "none"},
+                {"false_color", false},
+                {"focus_peaking", false},
+                {"zebra_stripes", false}
+            }}
+        };
+        save_preset("indoor-preview", j);
+    } else {
+        nlohmann::json j;
+        if (load_preset("indoor-preview", j) && !j.contains("sensor_mode")) {
+            j["sensor_mode"] = 1;
+            save_preset("indoor-preview", j);
+        }
+    }
+
+    // 2. pitch-ai-120fps (120fps sensor mode 2)
+    auto pitch_ai_path = storage_dir_ + "/pitch-ai-120fps.json";
+    if (!fs::exists(pitch_ai_path)) {
+        nlohmann::json j = {
+            {"description", "Pitch AI 120fps tracking: 120fps sensor mode, auto exposure (max 1ms, max gain 22.25x)"},
+            {"sensor_mode", 2},
+            {"controls", {
+                {"auto_exposure", true},
+                {"ae_max_exposure_us", 1000},
+                {"ae_max_gain", 22.25},
+                {"awb_mode", "auto"},
+                {"antibanding", "60hz"}
+            }},
+            {"display", {
+                {"zoom_mode", "fit"},
+                {"fps_limit", 30},
+                {"grid_mode", "crosshair"},
+                {"false_color", false},
+                {"focus_peaking", false},
+                {"zebra_stripes", false}
+            }}
+        };
+        save_preset("pitch-ai-120fps", j);
+    } else {
+        nlohmann::json j;
+        if (load_preset("pitch-ai-120fps", j) && !j.contains("sensor_mode")) {
+            j["sensor_mode"] = 2;
+            save_preset("pitch-ai-120fps", j);
+        }
+    }
+
+    // 3. baseball-outdoor-120fps
     auto outdoor_path = storage_dir_ + "/baseball-outdoor-120fps.json";
     if (!fs::exists(outdoor_path)) {
         nlohmann::json j = {
             {"description", "120fps high-speed baseball tracking: low motion blur (1ms)"},
+            {"sensor_mode", 2},
             {"controls", {
                 {"auto_exposure", false},
                 {"exposure_us", 1000},
@@ -55,12 +119,20 @@ void PresetManager::ensure_defaults() {
             }}
         };
         save_preset("baseball-outdoor-120fps", j);
+    } else {
+        nlohmann::json j;
+        if (load_preset("baseball-outdoor-120fps", j) && !j.contains("sensor_mode")) {
+            j["sensor_mode"] = 2;
+            save_preset("baseball-outdoor-120fps", j);
+        }
     }
 
+    // 4. default-120fps
     auto default_path = storage_dir_ + "/default-120fps.json";
     if (!fs::exists(default_path)) {
         nlohmann::json j = {
             {"description", "Default IMX477 120fps baseline: 4ms exposure, 2x gain"},
+            {"sensor_mode", 2},
             {"controls", {
                 {"auto_exposure", false},
                 {"exposure_us", 4000},
@@ -75,12 +147,20 @@ void PresetManager::ensure_defaults() {
             }}
         };
         save_preset("default-120fps", j);
+    } else {
+        nlohmann::json j;
+        if (load_preset("default-120fps", j) && !j.contains("sensor_mode")) {
+            j["sensor_mode"] = 2;
+            save_preset("default-120fps", j);
+        }
     }
 
+    // 5. indoor-office-120fps
     auto indoor_path = storage_dir_ + "/indoor-office-120fps.json";
     if (!fs::exists(indoor_path)) {
         nlohmann::json j = {
             {"description", "Indoor 60Hz room lighting: 8ms exposure, 8x gain, fluorescent white balance"},
+            {"sensor_mode", 2},
             {"controls", {
                 {"auto_exposure", false},
                 {"exposure_us", 8000},
@@ -95,6 +175,12 @@ void PresetManager::ensure_defaults() {
             }}
         };
         save_preset("indoor-office-120fps", j);
+    } else {
+        nlohmann::json j;
+        if (load_preset("indoor-office-120fps", j) && !j.contains("sensor_mode")) {
+            j["sensor_mode"] = 2;
+            save_preset("indoor-office-120fps", j);
+        }
     }
 }
 
